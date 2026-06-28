@@ -5,23 +5,23 @@ import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatModel;
 import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatOptions;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.model.ChatModel;
-import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 @Configuration
 public class LLMConfig {
-    // 模型名称常量定义，一套系统多模型共存
-    private final String DEEPSEEK_MODEL = "deepseek-v4";
+    @Value("${spring.ai.dashscope.api-key:missing-api-key}")
+    private String dashScopeApiKey;
 
     @Bean(name = "deepSeek")
     public ChatModel deepSeek() {
         return DashScopeChatModel.builder()
-                .dashScopeApi(DashScopeApi.builder().apiKey(System.getenv("DASHSCOPE_API_KEY")).build())
+                .dashScopeApi(DashScopeApi.builder().apiKey(dashScopeApiKey).build())
                 .defaultOptions(DashScopeChatOptions.builder()
                         // Note: model must be set when use options build.
-                        .model(DashScopeChatModel.DEFAULT_MODEL_NAME)
+                        .model("deepseek-v4-pro")
                         .temperature(0.5)
                         .maxToken(1000)
                         .build())
@@ -30,9 +30,6 @@ public class LLMConfig {
 
     @Bean(name = "deepSeekChatClient")
     public ChatClient deepSeekChatClient(@Qualifier("deepSeek") ChatModel deepseek) {
-        return
-                ChatClient.builder(deepseek)
-                        .defaultOptions(ChatOptions.builder().model(DEEPSEEK_MODEL).build())
-                        .build();
+        return ChatClient.builder(deepseek).build();
     }
 }

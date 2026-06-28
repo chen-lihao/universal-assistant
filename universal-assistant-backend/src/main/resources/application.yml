@@ -5,4 +5,4 @@ server:
 spring:
   ai:
     dashscope:
-      api-key: ${DASHSCOPE_API_KEY}
+      api-key: ${DASHSCOPE_API_KEY:missing-api-key}

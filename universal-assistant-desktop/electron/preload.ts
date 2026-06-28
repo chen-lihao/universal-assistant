@@ -1,24 +1,27 @@
 import { ipcRenderer, contextBridge } from 'electron'
+import type { IpcRendererEvent } from 'electron'
 
-// --------- Expose some API to the Renderer process ---------
-contextBridge.exposeInMainWorld('ipcRenderer', {
-  on(...args: Parameters<typeof ipcRenderer.on>) {
-    const [channel, listener] = args
-    return ipcRenderer.on(channel, (event, ...args) => listener(event, ...args))
-  },
-  off(...args: Parameters<typeof ipcRenderer.off>) {
-    const [channel, ...omit] = args
-    return ipcRenderer.off(channel, ...omit)
-  },
-  send(...args: Parameters<typeof ipcRenderer.send>) {
-    const [channel, ...omit] = args
-    return ipcRenderer.send(channel, ...omit)
-  },
-  invoke(...args: Parameters<typeof ipcRenderer.invoke>) {
-    const [channel, ...omit] = args
-    return ipcRenderer.invoke(channel, ...omit)
-  },
+type PetState = 'idle' | 'thinking' | 'speaking' | 'happy' | 'curious' | 'sleepy' | 'running' | 'error'
 
-  // You can expose other APTs you need here.
-  // ...
+contextBridge.exposeInMainWorld('assistant', {
+  toggleChat: () => ipcRenderer.invoke('assistant:toggle-chat'),
+  hideChat: () => ipcRenderer.invoke('assistant:hide-chat'),
+  getBackendUrl: () => ipcRenderer.invoke('assistant:get-backend-url'),
+  setPetState: (state: PetState) => ipcRenderer.invoke('assistant:set-pet-state', state),
+  setPetPointerActive: (active: boolean) => ipcRenderer.invoke('assistant:set-pet-pointer-active', active),
+  movePetBy: (payload: { deltaX: number; deltaY: number }) => ipcRenderer.invoke('assistant:move-pet-by', payload),
+  onPetState: (callback: (state: PetState) => void) => {
+    const listener = (_event: IpcRendererEvent, state: PetState) => callback(state)
+    ipcRenderer.on('assistant:pet-state', listener)
+
+    return () => ipcRenderer.removeListener('assistant:pet-state', listener)
+  },
+  files: {
+    select: (options?: { directory?: boolean; multiple?: boolean }) => ipcRenderer.invoke('file:select', options),
+    readText: (filePath: string) => ipcRenderer.invoke('file:read-text', filePath),
+    writeText: (payload: { filePath: string; content: string }) => ipcRenderer.invoke('file:write-text', payload),
+    saveTextAs: (payload: { defaultPath?: string; content: string }) => ipcRenderer.invoke('file:save-text-as', payload),
+    convertText: (payload: { filePath: string; targetFormat: string }) =>
+      ipcRenderer.invoke('file:convert-text', payload),
+  },
 })
