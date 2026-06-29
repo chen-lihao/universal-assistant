@@ -2,15 +2,33 @@
 import { onMounted, onUnmounted, ref } from 'vue'
 import mascot from '../assets/assistant-mascot.png'
 
+type FireworkParticle = {
+  id: number
+  x: number
+  y: number
+  color: string
+  delay: number
+  size: number
+}
+
 const petState = ref<PetState>('idle')
+const petAction = ref<PetAction | null>(null)
+const particles = ref<FireworkParticle[]>([])
+const rocketVisible = ref(false)
+const burstActive = ref(false)
 const isClicking = ref(false)
 const isDragging = ref(false)
 const isHovering = ref(false)
 let removePetStateListener: (() => void) | undefined
+let removePetActionListener: (() => void) | undefined
 let clickTimer: number | undefined
 let hoverTimer: number | undefined
 let idleTimer: number | undefined
 let transientStateTimer: number | undefined
+let actionTimer: number | undefined
+let rocketTimer: number | undefined
+let particleTimer: number | undefined
+let menuReleaseTimer: number | undefined
 let dragFrame: number | undefined
 let dragPointerId: number | undefined
 let dragStartX = 0
@@ -27,6 +45,119 @@ function canUseInteractiveState() {
 
 function setPetState(state: PetState) {
   void window.assistant?.setPetState(state)
+}
+
+function clearAction() {
+  window.clearTimeout(actionTimer)
+  window.clearTimeout(rocketTimer)
+  window.clearTimeout(particleTimer)
+  petAction.value = null
+  particles.value = []
+  rocketVisible.value = false
+  burstActive.value = false
+}
+
+function finishAction(duration = 1200) {
+  window.clearTimeout(actionTimer)
+  actionTimer = window.setTimeout(() => {
+    petAction.value = null
+    if (!isHovering.value && !isDragging.value && canUseInteractiveState()) {
+      setPetState('idle')
+    } else if (isHovering.value && canUseInteractiveState()) {
+      setPetState('curious')
+    }
+    scheduleIdleMood()
+  }, duration)
+}
+
+function launchFireworks() {
+  rocketVisible.value = true
+  burstActive.value = false
+  particles.value = []
+  window.clearTimeout(rocketTimer)
+  window.clearTimeout(particleTimer)
+
+  rocketTimer = window.setTimeout(() => {
+    const colors = ['#38bdf8', '#34d399', '#fbbf24', '#fb7185', '#a78bfa', '#f472b6', '#fde047']
+    const nextParticles: FireworkParticle[] = []
+    for (let ring = 0; ring < 2; ring += 1) {
+      const count = ring === 0 ? 18 : 28
+      const baseDistance = ring === 0 ? 72 : 122
+      for (let i = 0; i < count; i += 1) {
+        const angle = (Math.PI * 2 * i) / count + ring * 0.08
+        const distance = baseDistance + Math.random() * 24
+        nextParticles.push({
+          id: Date.now() + ring * 100 + i,
+          x: Math.cos(angle) * distance,
+          y: Math.sin(angle) * distance,
+          color: colors[(i + ring) % colors.length],
+          delay: Math.random() * 130,
+          size: ring === 0 ? 8 : 6,
+        })
+      }
+    }
+
+    rocketVisible.value = false
+    burstActive.value = true
+    particles.value = nextParticles
+  }, 720)
+
+  particleTimer = window.setTimeout(() => {
+    particles.value = []
+    burstActive.value = false
+  }, 2200)
+}
+
+function particleStyle(particle: FireworkParticle) {
+  return {
+    '--tx': `${particle.x}px`,
+    '--ty': `${particle.y}px`,
+    '--particle-color': particle.color,
+    '--particle-delay': `${particle.delay}ms`,
+    '--particle-size': `${particle.size}px`,
+  }
+}
+
+function runPetAction(action: PetAction) {
+  clearAction()
+
+  if (action === 'idle') {
+    setPetState('idle')
+    scheduleIdleMood()
+    return
+  }
+
+  petAction.value = action
+
+  if (action === 'wave') {
+    setPetState('happy')
+    finishAction(1400)
+    return
+  }
+
+  if (action === 'jump') {
+    setPetState('happy')
+    finishAction(1250)
+    return
+  }
+
+  if (action === 'fireworks') {
+    setPetState('happy')
+    launchFireworks()
+    finishAction(2400)
+    return
+  }
+
+  if (action === 'run') {
+    setPetState('running')
+    finishAction(1650)
+    return
+  }
+
+  if (action === 'sleep') {
+    setPetState('sleepy')
+    finishAction(5200)
+  }
 }
 
 function scheduleIdleMood(delay = 35000) {
@@ -77,6 +208,18 @@ function handlePointerEnter() {
       setPetState('curious')
     }
   }, 700)
+}
+
+function openPetMenu(event: MouseEvent) {
+  event.preventDefault()
+  setPetPointerActive(true)
+  void window.assistant?.showPetMenu()
+  window.clearTimeout(menuReleaseTimer)
+  menuReleaseTimer = window.setTimeout(() => {
+    if (dragPointerId === undefined) {
+      setPetPointerActive(false)
+    }
+  }, 1600)
 }
 
 function handlePointerLeave() {
@@ -211,15 +354,23 @@ onMounted(() => {
   removePetStateListener = window.assistant?.onPetState((state) => {
     petState.value = state
   })
+  removePetActionListener = window.assistant?.onPetAction((action) => {
+    runPetAction(action)
+  })
   scheduleIdleMood()
 })
 
 onUnmounted(() => {
   removePetStateListener?.()
+  removePetActionListener?.()
   window.clearTimeout(clickTimer)
   window.clearTimeout(hoverTimer)
   window.clearTimeout(idleTimer)
   window.clearTimeout(transientStateTimer)
+  window.clearTimeout(actionTimer)
+  window.clearTimeout(rocketTimer)
+  window.clearTimeout(particleTimer)
+  window.clearTimeout(menuReleaseTimer)
   if (dragFrame !== undefined) {
     window.cancelAnimationFrame(dragFrame)
   }
@@ -227,7 +378,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <main class="pet-shell" :class="`state-${petState}`">
+  <main class="pet-shell" :class="[`state-${petState}`, petAction ? `action-${petAction}` : '']">
     <button
       class="pet-button"
       :class="{ 'is-clicking': isClicking, 'is-dragging': isDragging }"
@@ -239,9 +390,16 @@ onUnmounted(() => {
       @pointercancel="cancelDrag"
       @pointerenter="handlePointerEnter"
       @pointerleave="handlePointerLeave"
+      @contextmenu="openPetMenu"
     >
       <span class="pet-aura" />
+      <span class="pet-speed-lines">
+        <span />
+        <span />
+        <span />
+      </span>
       <img class="pet-image" :src="mascot" alt="Universal Assistant mascot" />
+      <span class="pet-wave" />
       <span class="pet-signal pet-signal-one" />
       <span class="pet-signal pet-signal-two" />
       <span class="pet-talk" />
@@ -250,6 +408,15 @@ onUnmounted(() => {
       <span class="pet-emotion pet-emotion-sleepy">Zz</span>
       <span class="pet-emotion pet-emotion-error">!</span>
       <span class="pet-status" />
+      <span v-if="rocketVisible" class="firework-rocket" />
+      <span class="firework-origin" :class="{ active: burstActive }">
+        <span
+          v-for="particle in particles"
+          :key="particle.id"
+          class="firework-particle"
+          :style="particleStyle(particle)"
+        />
+      </span>
     </button>
   </main>
 </template>
@@ -258,8 +425,10 @@ onUnmounted(() => {
 .pet-shell {
   width: 100vw;
   height: 100vh;
-  display: grid;
-  place-items: center;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding-bottom: 24px;
   overflow: hidden;
   background: transparent;
   user-select: none;
@@ -267,8 +436,8 @@ onUnmounted(() => {
 
 .pet-button {
   position: relative;
-  width: 150px;
-  height: 184px;
+  width: 166px;
+  height: 206px;
   padding: 0;
   border: 0;
   background: transparent;
@@ -278,6 +447,7 @@ onUnmounted(() => {
   transform-origin: 50% 82%;
   outline: none;
   filter: drop-shadow(0 10px 14px rgba(12, 24, 22, 0.18));
+  overflow: visible;
 }
 
 .pet-button.is-dragging {
@@ -328,6 +498,22 @@ onUnmounted(() => {
   animation: pet-error 460ms ease-in-out infinite;
 }
 
+.action-wave .pet-button {
+  animation: pet-wave-body 1.2s ease-in-out infinite;
+}
+
+.action-jump .pet-button {
+  animation: pet-action-jump 760ms cubic-bezier(0.34, 1.56, 0.64, 1) infinite;
+}
+
+.action-fireworks .pet-button {
+  animation: pet-happy 820ms cubic-bezier(0.34, 1.56, 0.64, 1) infinite;
+}
+
+.action-run .pet-button {
+  animation: pet-running 300ms ease-in-out infinite;
+}
+
 .pet-aura {
   position: absolute;
   left: 18px;
@@ -338,6 +524,45 @@ onUnmounted(() => {
   background: radial-gradient(circle, rgba(18, 131, 121, 0.26), rgba(18, 131, 121, 0));
   filter: blur(2px);
   animation: aura-pulse 3.4s ease-in-out infinite;
+}
+
+.pet-speed-lines {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.pet-speed-lines span {
+  position: absolute;
+  left: -54px;
+  width: 54px;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(38, 219, 205, 0.72);
+  box-shadow: 0 0 12px rgba(38, 219, 205, 0.64);
+  animation: speed-line 360ms ease-out infinite;
+}
+
+.pet-speed-lines span:nth-child(1) {
+  top: 82px;
+}
+
+.pet-speed-lines span:nth-child(2) {
+  top: 112px;
+  animation-delay: 80ms;
+  transform: scaleX(0.72);
+}
+
+.pet-speed-lines span:nth-child(3) {
+  top: 142px;
+  animation-delay: 150ms;
+  transform: scaleX(0.86);
+}
+
+.state-running .pet-speed-lines,
+.action-run .pet-speed-lines {
+  opacity: 1;
 }
 
 .state-happy .pet-aura {
@@ -358,6 +583,13 @@ onUnmounted(() => {
 .state-error .pet-aura {
   background: radial-gradient(circle, rgba(255, 90, 95, 0.42), rgba(255, 90, 95, 0));
   animation-duration: 420ms;
+}
+
+.action-jump .pet-aura,
+.action-fireworks .pet-aura,
+.action-wave .pet-aura {
+  background: radial-gradient(circle, rgba(255, 200, 87, 0.52), rgba(255, 200, 87, 0));
+  animation-duration: 760ms;
 }
 
 .pet-image {
@@ -382,6 +614,25 @@ onUnmounted(() => {
 
 .state-sleepy .pet-image {
   animation: pet-sleep-breathe 3.2s ease-in-out infinite;
+}
+
+.pet-wave {
+  position: absolute;
+  left: 18px;
+  top: 88px;
+  width: 42px;
+  height: 42px;
+  border-radius: 999px;
+  border: 3px solid rgba(255, 200, 87, 0.85);
+  border-left-color: transparent;
+  border-bottom-color: transparent;
+  opacity: 0;
+  pointer-events: none;
+  transform: rotate(-16deg) scale(0.56);
+}
+
+.action-wave .pet-wave {
+  animation: wave-arc 560ms ease-out infinite;
 }
 
 .pet-signal {
@@ -476,6 +727,76 @@ onUnmounted(() => {
   animation: emotion-pop 460ms ease-in-out infinite;
   color: #ffffff;
   background: #ff5a5f;
+}
+
+.action-wave .pet-emotion-happy,
+.action-jump .pet-emotion-happy,
+.action-fireworks .pet-emotion-happy {
+  opacity: 1;
+  animation: emotion-pop 760ms ease-in-out infinite;
+  color: #9a5b00;
+  background: #ffe9a6;
+}
+
+.firework-origin {
+  position: absolute;
+  left: 50%;
+  top: 18px;
+  width: 1px;
+  height: 1px;
+  pointer-events: none;
+}
+
+.firework-origin.active::before {
+  content: "";
+  position: absolute;
+  left: -14px;
+  top: -14px;
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  border: 2px solid rgba(255, 255, 255, 0.86);
+  box-shadow: 0 0 24px rgba(251, 191, 36, 0.86);
+  animation: burst-ring 720ms ease-out forwards;
+}
+
+.firework-rocket {
+  position: absolute;
+  left: 48px;
+  bottom: 76px;
+  width: 8px;
+  height: 22px;
+  border-radius: 999px;
+  background: #f97316;
+  box-shadow: 0 0 14px rgba(249, 115, 22, 0.9);
+  pointer-events: none;
+  animation: rocket-up 720ms cubic-bezier(0.2, 0.78, 0.28, 1) forwards;
+}
+
+.firework-rocket::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 18px;
+  width: 4px;
+  height: 38px;
+  border-radius: 999px;
+  background: linear-gradient(rgba(251, 191, 36, 0.95), rgba(251, 113, 133, 0));
+  transform: translateX(-50%);
+}
+
+.firework-particle {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: var(--particle-size);
+  height: var(--particle-size);
+  border-radius: 999px;
+  background: var(--particle-color);
+  box-shadow: 0 0 18px var(--particle-color);
+  opacity: 0;
+  animation: firework-burst 1180ms ease-out forwards;
+  animation-delay: var(--particle-delay);
 }
 
 .pet-status {
@@ -608,6 +929,31 @@ onUnmounted(() => {
   }
 }
 
+@keyframes pet-wave-body {
+  0%,
+  100% {
+    transform: translateY(0) rotate(-2deg);
+  }
+  50% {
+    transform: translateY(-5px) rotate(4deg);
+  }
+}
+
+@keyframes pet-action-jump {
+  0% {
+    transform: translateY(6px) scale(1.12, 0.86);
+  }
+  34% {
+    transform: translateY(-46px) scale(0.88, 1.18) rotate(-4deg);
+  }
+  62% {
+    transform: translateY(-16px) scale(0.96, 1.08) rotate(2deg);
+  }
+  100% {
+    transform: translateY(4px) scale(1.08, 0.92);
+  }
+}
+
 @keyframes pet-click {
   0% {
     transform: translateY(0) scale(1);
@@ -676,6 +1022,20 @@ onUnmounted(() => {
   }
 }
 
+@keyframes speed-line {
+  0% {
+    opacity: 0;
+    transform: translateX(16px) scaleX(0.36);
+  }
+  30% {
+    opacity: 0.95;
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(104px) scaleX(1);
+  }
+}
+
 @keyframes signal-pulse {
   0% {
     opacity: 0;
@@ -733,6 +1093,67 @@ onUnmounted(() => {
   100% {
     transform: translateY(-18px) scale(1.04);
     opacity: 0;
+  }
+}
+
+@keyframes wave-arc {
+  0% {
+    opacity: 0;
+    transform: rotate(-32deg) scale(0.42);
+  }
+  35% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: rotate(28deg) scale(1.08);
+  }
+}
+
+@keyframes rocket-up {
+  0% {
+    opacity: 0;
+    transform: translate(0, 0) scale(0.7) rotate(-10deg);
+  }
+  12% {
+    opacity: 1;
+  }
+  76% {
+    opacity: 1;
+    transform: translate(78px, -142px) scale(1) rotate(8deg);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(84px, -160px) scale(0.45) rotate(8deg);
+  }
+}
+
+@keyframes burst-ring {
+  0% {
+    opacity: 0.92;
+    transform: scale(0.35);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(3.2);
+  }
+}
+
+@keyframes firework-burst {
+  0% {
+    opacity: 0;
+    transform: translate(0, 0) scale(0.25);
+  }
+  12% {
+    opacity: 1;
+  }
+  58% {
+    opacity: 1;
+    transform: translate(calc(var(--tx) * 0.86), calc(var(--ty) * 0.86)) scale(1.2);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(var(--tx), var(--ty)) scale(0.08);
   }
 }
 </style>

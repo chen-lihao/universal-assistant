@@ -3,6 +3,26 @@ server:
 
 # application.yml
 spring:
+  datasource:
+    url: ${ASSISTANT_DB_URL:jdbc:postgresql://localhost:5432/universal_assistant}
+    username: ${ASSISTANT_DB_USERNAME:assistant}
+    password: ${ASSISTANT_DB_PASSWORD:assistant}
+  flyway:
+    enabled: true
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
   ai:
     dashscope:
       api-key: ${DASHSCOPE_API_KEY:missing-api-key}
+
+assistant:
+  chat:
+    max-tokens: ${ASSISTANT_CHAT_MAX_TOKENS:2400}
+  agent:
+    max-steps: ${ASSISTANT_AGENT_MAX_STEPS:6}
+    reflection-limit: ${ASSISTANT_AGENT_REFLECTION_LIMIT:1}
+  memory:
+    enabled: ${ASSISTANT_MEMORY_ENABLED:true}
+    retrieve-limit: ${ASSISTANT_MEMORY_RETRIEVE_LIMIT:5}

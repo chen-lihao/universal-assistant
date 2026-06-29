@@ -26,6 +26,7 @@ type ConvertTextResult = {
 }
 
 type PetState = 'idle' | 'thinking' | 'speaking' | 'happy' | 'curious' | 'sleepy' | 'running' | 'error'
+type PetAction = 'wave' | 'jump' | 'fireworks' | 'run' | 'sleep' | 'idle'
 
 interface Window {
   assistant?: {
@@ -34,8 +35,17 @@ interface Window {
     getBackendUrl: () => Promise<string>
     setPetState: (state: PetState) => Promise<void>
     setPetPointerActive: (active: boolean) => Promise<void>
+    showPetMenu: () => Promise<void>
+    performPetMotion: (payload: {
+      type?: string
+      rangeX?: number
+      rangeY?: number
+      duration?: number
+      force?: boolean
+    }) => Promise<void>
     movePetBy: (payload: { deltaX: number; deltaY: number }) => Promise<void>
     onPetState: (callback: (state: PetState) => void) => () => void
+    onPetAction: (callback: (action: PetAction) => void) => () => void
     files: {
       select: (options?: { directory?: boolean; multiple?: boolean }) => Promise<FileSelectResult>
       readText: (filePath: string) => Promise<TextFileResult>

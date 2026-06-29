@@ -15,6 +15,9 @@ public class LLMConfig {
     @Value("${spring.ai.dashscope.api-key:missing-api-key}")
     private String dashScopeApiKey;
 
+    @Value("${assistant.chat.max-tokens:2400}")
+    private int maxTokens;
+
     @Bean(name = "deepSeek")
     public ChatModel deepSeek() {
         return DashScopeChatModel.builder()
@@ -23,7 +26,7 @@ public class LLMConfig {
                         // Note: model must be set when use options build.
                         .model("deepseek-v4-pro")
                         .temperature(0.5)
-                        .maxToken(1000)
+                        .maxToken(maxTokens)
                         .build())
                 .build();
     }

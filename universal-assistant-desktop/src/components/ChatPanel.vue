@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 import {
   Bot,
   ChevronDown,
@@ -7,7 +7,9 @@ import {
   Cpu,
   FileText,
   FolderOpen,
+  History as HistoryIcon,
   Paperclip,
+  Plus,
   RefreshCw,
   Save,
   Search,
@@ -15,42 +17,92 @@ import {
   Sparkles,
   X,
 } from '@lucide/vue'
-import { sendChat, type ChatMessage, type SearchResult } from '../services/assistantApi'
+import {
+  listConversations,
+  loadConversationMessages,
+  sendChat,
+  streamChat,
+  type AgentStep,
+  type ChatMessage,
+  type ChatRequest,
+  type ChatResponse,
+  type ChatStreamEvent,
+  type ChatStreamPhase,
+  type ConversationMessage,
+  type ConversationSummary,
+  type SearchResult,
+} from '../services/assistantApi'
+import MarkdownMessage from './MarkdownMessage.vue'
 
 type UiMessage = ChatMessage & {
-  id: number
+  id: number | string
+  messageId?: string
   sources?: SearchResult[]
   realtimeSearchUsed?: boolean
   modelAvailable?: boolean
   model?: string
+  agentRunId?: string
+  agentSteps?: AgentStep[]
+  phase?: ChatStreamPhase
+  isStreaming?: boolean
 }
+
+type UiPhase = ChatStreamPhase | 'idle'
 
 const modelOptions = [
   { value: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
   { value: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash' },
 ] as const
 
-const messages = ref<UiMessage[]>([
-  {
-    id: 1,
+const phaseLabels: Record<UiPhase, string> = {
+  idle: '在线',
+  thinking: '思考中',
+  planning: '规划中',
+  acting: '调用工具中',
+  searching: '检索中',
+  reflecting: '反思中',
+  answering: '回答中',
+  done: '回答完毕',
+  error: '出错',
+}
+
+function welcomeMessage(): UiMessage {
+  return {
+    id: 'welcome',
     role: 'assistant',
     content: '我已经在线。可以直接提问，也可以选择本地文本文件进行读取、编辑或转换。',
     modelAvailable: true,
-  },
-])
+  }
+}
+
+const messages = ref<UiMessage[]>([welcomeMessage()])
+const conversations = ref<ConversationSummary[]>([])
+const currentConversationId = ref<string>()
+const conversationPanelOpen = ref(false)
+const conversationsLoading = ref(false)
 const draft = ref('')
 const realtimeSearch = ref(false)
 const selectedModel = ref('deepseek-v4-pro')
 const isSending = ref(false)
+const currentPhase = ref<UiPhase>('idle')
 const filePanelOpen = ref(false)
 const selectedFilePath = ref('')
 const fileContent = ref('')
 const fileDirty = ref(false)
 const targetFormat = ref('md')
 const errorText = ref('')
+const messageListRef = ref<HTMLElement | null>(null)
 
 const isElectron = computed(() => Boolean(window.assistant))
-const assistantStatus = computed(() => (isSending.value ? '思考中' : '在线'))
+const assistantStatus = computed(() => phaseLabels[currentPhase.value])
+const currentConversationTitle = computed(() => {
+  if (!currentConversationId.value) {
+    return '新会话'
+  }
+
+  return conversations.value.find((conversation) => conversation.id === currentConversationId.value)?.title || '当前会话'
+})
+const headerSubtitle = computed(() => `${assistantStatus.value} · ${modelLabel(selectedModel.value)} · ${currentConversationTitle.value}`)
 const showFilePanel = computed(() => filePanelOpen.value)
 const selectedFileName = computed(() => {
   if (!selectedFilePath.value) {
@@ -60,21 +112,265 @@ const selectedFileName = computed(() => {
   return selectedFilePath.value.split(/[\\/]/).pop() || selectedFilePath.value
 })
 let petIdleTimer: number | undefined
+let phaseResetTimer: number | undefined
+let typewriterTimer: number | undefined
+let typewriterQueue = ''
+let typewriterMessage: UiMessage | undefined
+let pendingDoneMessage: UiMessage | undefined
+
+onMounted(async () => {
+  await refreshConversations()
+  if (!currentConversationId.value && conversations.value.length > 0) {
+    await openConversation(conversations.value[0])
+  }
+})
 
 function nextId() {
   return Date.now() + Math.floor(Math.random() * 1000)
 }
 
+function toUiMessage(message: ConversationMessage): UiMessage {
+  return {
+    id: message.id,
+    messageId: message.id,
+    role: message.role,
+    content: message.content,
+    model: message.model,
+    realtimeSearchUsed: message.realtimeSearchUsed,
+    modelAvailable: message.modelAvailable,
+    sources: message.sources || [],
+    agentSteps: [],
+    phase: message.role === 'assistant' ? 'done' : undefined,
+    isStreaming: false,
+  }
+}
+
 function appendMessage(message: Omit<UiMessage, 'id'>) {
-  messages.value.push({ ...message, id: nextId() })
+  const nextMessage = { ...message, id: nextId() }
+  messages.value.push(nextMessage)
+  scrollMessagesToBottom()
+  return nextMessage
 }
 
 function recentHistory() {
   return messages.value.slice(-8).map(({ role, content }) => ({ role, content }))
 }
 
+async function refreshConversations() {
+  conversationsLoading.value = true
+  try {
+    conversations.value = await listConversations()
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    conversationsLoading.value = false
+  }
+}
+
+function startNewConversation() {
+  currentConversationId.value = undefined
+  messages.value = [welcomeMessage()]
+  draft.value = ''
+  errorText.value = ''
+  conversationPanelOpen.value = false
+  setCurrentPhase('idle')
+  scrollMessagesToBottom()
+}
+
+function createNewConversation() {
+  startNewConversation()
+}
+
+async function openConversation(conversation: ConversationSummary) {
+  if (isSending.value) {
+    return
+  }
+
+  try {
+    errorText.value = ''
+    const response = await loadConversationMessages(conversation.id)
+    currentConversationId.value = response.conversationId
+    const loadedMessages = response.messages.map(toUiMessage)
+    messages.value = loadedMessages.length ? loadedMessages : [welcomeMessage()]
+    conversationPanelOpen.value = false
+    setCurrentPhase('idle')
+    scrollMessagesToBottom()
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : String(error)
+  }
+}
+
+function formatConversationTime(value: string) {
+  if (!value) {
+    return ''
+  }
+
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return ''
+  }
+
+  return new Intl.DateTimeFormat('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(date)
+}
+
+function scrollMessagesToBottom() {
+  void nextTick(() => {
+    const list = messageListRef.value
+    if (list) {
+      list.scrollTop = list.scrollHeight
+    }
+  })
+}
+
+function phaseLabel(phase?: UiPhase) {
+  return phase ? phaseLabels[phase] : ''
+}
+
+function setCurrentPhase(phase: UiPhase) {
+  window.clearTimeout(phaseResetTimer)
+  currentPhase.value = phase
+}
+
+function resetCurrentPhaseLater(delay = 1400) {
+  window.clearTimeout(phaseResetTimer)
+  phaseResetTimer = window.setTimeout(() => {
+    currentPhase.value = 'idle'
+  }, delay)
+}
+
+function mergeSources(existing: SearchResult[] | undefined, incoming: SearchResult[] | undefined) {
+  const merged = new Map<string, SearchResult>()
+  for (const source of existing || []) {
+    if (source.url) {
+      merged.set(source.url, source)
+    }
+  }
+  for (const source of incoming || []) {
+    if (source.url) {
+      merged.set(source.url, source)
+    }
+  }
+  return Array.from(merged.values())
+}
+
+function completeAssistantMessage(message: UiMessage) {
+  if (message.phase === 'error') {
+    return
+  }
+
+  message.phase = 'done'
+  message.isStreaming = false
+  setCurrentPhase('done')
+  schedulePetIdle(900)
+  resetCurrentPhaseLater()
+  scrollMessagesToBottom()
+}
+
+function startTypewriter() {
+  if (typewriterTimer !== undefined) {
+    return
+  }
+
+  typewriterTimer = window.setInterval(() => {
+    if (!typewriterMessage || !typewriterQueue) {
+      window.clearInterval(typewriterTimer)
+      typewriterTimer = undefined
+      if (pendingDoneMessage) {
+        const message = pendingDoneMessage
+        pendingDoneMessage = undefined
+        completeAssistantMessage(message)
+      }
+      return
+    }
+
+    const chunkSize = typewriterQueue.length > 80 ? 3 : typewriterQueue.length > 24 ? 2 : 1
+    typewriterMessage.content += typewriterQueue.slice(0, chunkSize)
+    typewriterQueue = typewriterQueue.slice(chunkSize)
+    scrollMessagesToBottom()
+  }, 28)
+}
+
+function enqueueTypewriterText(message: UiMessage, content: string) {
+  if (!content) {
+    return
+  }
+
+  typewriterMessage = message
+  typewriterQueue += content
+  startTypewriter()
+}
+
+function markDoneAfterTypewriter(message: UiMessage) {
+  message.isStreaming = false
+  if (typewriterMessage === message && typewriterQueue) {
+    pendingDoneMessage = message
+    return
+  }
+
+  completeAssistantMessage(message)
+}
+
+function flushTypewriter(message: UiMessage) {
+  if (typewriterMessage !== message) {
+    return
+  }
+
+  message.content += typewriterQueue
+  typewriterQueue = ''
+  window.clearInterval(typewriterTimer)
+  typewriterTimer = undefined
+  if (pendingDoneMessage === message) {
+    pendingDoneMessage = undefined
+  }
+}
+
 function modelLabel(model?: string) {
   return modelOptions.find((option) => option.value === model)?.label || model || ''
+}
+
+function sourceLabel(source: SearchResult) {
+  if (source.provider) {
+    return source.provider
+  }
+
+  try {
+    return new URL(source.url).hostname
+  } catch {
+    return 'source'
+  }
+}
+
+function stepStatusLabel(status: string) {
+  if (status === 'completed') {
+    return '完成'
+  }
+  if (status === 'failed') {
+    return '失败'
+  }
+  if (status === 'running') {
+    return '进行中'
+  }
+  return status || '记录'
+}
+
+function stepTypeLabel(type: string) {
+  const labels: Record<string, string> = {
+    thought: '思考',
+    plan: '计划',
+    action: '动作',
+    observation: '观察',
+    memory: '记忆',
+    reflection: '反思',
+    final: '结果',
+    error: '错误',
+    limit: '限制',
+  }
+  return labels[type] || type
 }
 
 function isSupportedModel(model: string) {
@@ -90,9 +386,11 @@ function schedulePetIdle(delay = 1400) {
   petIdleTimer = window.setTimeout(() => setPetState('idle'), delay)
 }
 
-function markPetSpeaking() {
+function markPetSpeaking(delay = 1400) {
   setPetState('speaking')
-  schedulePetIdle()
+  if (delay > 0) {
+    schedulePetIdle(delay)
+  }
 }
 
 function markPetError() {
@@ -147,6 +445,129 @@ async function hideChat() {
   await window.assistant?.hideChat()
 }
 
+function applyStreamPhase(message: UiMessage, phase: ChatStreamPhase) {
+  message.phase = phase
+  setCurrentPhase(phase)
+
+  if (phase === 'thinking' || phase === 'planning' || phase === 'searching' || phase === 'acting' || phase === 'reflecting') {
+    setPetState('thinking')
+  } else if (phase === 'answering') {
+    markPetSpeaking(0)
+  } else if (phase === 'error') {
+    markPetError()
+  }
+
+  scrollMessagesToBottom()
+}
+
+function applyStreamEvent(event: ChatStreamEvent, message: UiMessage) {
+  if (event.type === 'status' && event.phase) {
+    applyStreamPhase(message, event.phase)
+    return
+  }
+
+  if (event.type === 'meta') {
+    if (event.conversationId) {
+      currentConversationId.value = event.conversationId
+    }
+    if (event.messageId) {
+      message.messageId = event.messageId
+      message.id = event.messageId
+    }
+    if (event.agentRunId) {
+      message.agentRunId = event.agentRunId
+    }
+    message.sources = mergeSources(message.sources, event.sources)
+    message.realtimeSearchUsed = message.realtimeSearchUsed || Boolean(event.realtimeSearchUsed)
+    if (event.modelAvailable !== undefined) {
+      message.modelAvailable = event.modelAvailable
+    }
+    message.model = event.model || message.model
+    scrollMessagesToBottom()
+    return
+  }
+
+  if (event.type === 'agent_step' && event.agentStep) {
+    message.agentRunId = event.agentRunId || event.agentStep.runId || message.agentRunId
+    const existing = message.agentSteps || []
+    const index = existing.findIndex((step) => step.id === event.agentStep?.id)
+    if (index >= 0) {
+      existing[index] = event.agentStep
+    } else {
+      existing.push(event.agentStep)
+    }
+    message.agentSteps = [...existing].sort((a, b) => a.index - b.index)
+    scrollMessagesToBottom()
+    return
+  }
+
+  if (event.type === 'delta') {
+    if (message.phase !== 'answering') {
+      applyStreamPhase(message, 'answering')
+    }
+    enqueueTypewriterText(message, event.content || '')
+    markPetSpeaking(0)
+    scrollMessagesToBottom()
+    return
+  }
+
+  if (event.type === 'error') {
+    flushTypewriter(message)
+    message.modelAvailable = false
+    message.phase = 'error'
+    message.isStreaming = false
+    if (event.message) {
+      message.content = message.content ? `${message.content}\n\n${event.message}` : event.message
+    }
+    setCurrentPhase('error')
+    markPetError()
+    scrollMessagesToBottom()
+    return
+  }
+
+  if (event.type === 'done') {
+    if (message.phase !== 'error') {
+      markDoneAfterTypewriter(message)
+    }
+    scrollMessagesToBottom()
+  }
+}
+
+function applyChatResponse(response: ChatResponse, message: UiMessage, fallbackModel: string) {
+  flushTypewriter(message)
+  if (response.conversationId) {
+    currentConversationId.value = response.conversationId
+  }
+  if (response.messageId) {
+    message.messageId = response.messageId
+    message.id = response.messageId
+  }
+  message.agentRunId = response.agentRunId || message.agentRunId
+  message.agentSteps = response.agentSteps || message.agentSteps || []
+  message.sources = mergeSources(message.sources, response.sources)
+  message.realtimeSearchUsed = message.realtimeSearchUsed || response.realtimeSearchUsed
+  message.modelAvailable = response.modelAvailable
+  message.model = response.model || fallbackModel
+  message.content = ''
+
+  if (!response.answer) {
+    message.content = '没有收到模型返回内容。'
+    message.phase = 'error'
+    message.isStreaming = false
+    setCurrentPhase('error')
+    markPetError()
+    scrollMessagesToBottom()
+    return
+  }
+
+  message.phase = 'answering'
+  message.isStreaming = true
+  setCurrentPhase('answering')
+  markPetSpeaking(0)
+  enqueueTypewriterText(message, response.answer)
+  markDoneAfterTypewriter(message)
+}
+
 async function send() {
   const text = draft.value.trim()
   if (!text || isSending.value) {
@@ -159,39 +580,70 @@ async function send() {
     return
   }
 
+  const history = recentHistory()
   appendMessage({ role: 'user', content: prepared.message })
+  const assistantMessage = appendMessage({
+    role: 'assistant',
+    content: '',
+    model: prepared.model,
+    modelAvailable: true,
+    phase: 'thinking',
+    isStreaming: true,
+  })
   isSending.value = true
   errorText.value = ''
-  setPetState('thinking')
+  applyStreamPhase(assistantMessage, 'thinking')
+  const chatRequest: ChatRequest = {
+    message: prepared.message,
+    realtimeSearch: realtimeSearch.value,
+    model: prepared.model,
+    history,
+    conversationId: currentConversationId.value,
+  }
+  let receivedStreamContent = false
 
   try {
-    const response = await sendChat({
-      message: prepared.message,
-      realtimeSearch: realtimeSearch.value,
-      model: prepared.model,
-      history: recentHistory(),
+    await streamChat(chatRequest, {
+      onEvent: (event) => {
+        if (event.type === 'delta' && event.content?.trim()) {
+          receivedStreamContent = true
+        }
+        applyStreamEvent(event, assistantMessage)
+      },
     })
 
-    appendMessage({
-      role: 'assistant',
-      content: response.answer,
-      sources: response.sources,
-      realtimeSearchUsed: response.realtimeSearchUsed,
-      modelAvailable: response.modelAvailable,
-      model: response.model || prepared.model,
-    })
-    markPetSpeaking()
+    if (!receivedStreamContent && assistantMessage.phase !== 'error') {
+      const response = await sendChat(chatRequest)
+      applyChatResponse(response, assistantMessage, prepared.model)
+      return
+    }
+
+    if (assistantMessage.phase !== 'error') {
+      markDoneAfterTypewriter(assistantMessage)
+    }
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    appendMessage({
-      role: 'assistant',
-      content: `后端暂时不可用：${message}。请确认 Spring Boot 服务已在 8080 端口启动。`,
-      modelAvailable: false,
-      model: prepared.model,
-    })
-    markPetError()
+    try {
+      if (!assistantMessage.content.trim()) {
+        const response = await sendChat(chatRequest)
+        applyChatResponse(response, assistantMessage, prepared.model)
+        return
+      }
+
+      markDoneAfterTypewriter(assistantMessage)
+    } catch (fallbackError) {
+      flushTypewriter(assistantMessage)
+      const message = fallbackError instanceof Error ? fallbackError.message : String(fallbackError)
+      assistantMessage.content = `后端暂时不可用：${message}。请确认 Spring Boot 服务已在 8080 端口启动。`
+      assistantMessage.modelAvailable = false
+      assistantMessage.phase = 'error'
+      assistantMessage.isStreaming = false
+      setCurrentPhase('error')
+      markPetError()
+    }
   } finally {
     isSending.value = false
+    void refreshConversations()
+    scrollMessagesToBottom()
   }
 }
 
@@ -307,7 +759,7 @@ async function convertSelectedFile() {
 </script>
 
 <template>
-  <main class="chat-window">
+  <main class="chat-window" :class="{ 'has-conversations': conversationPanelOpen }">
     <header class="chat-header">
       <div class="brand">
         <span class="brand-avatar" aria-hidden="true">
@@ -315,50 +767,107 @@ async function convertSelectedFile() {
         </span>
         <div class="brand-copy">
           <strong>Universal Assistant</strong>
-          <span>{{ assistantStatus }} · {{ modelLabel(selectedModel) }}</span>
+          <span>{{ headerSubtitle }}</span>
         </div>
       </div>
       <div class="header-actions">
-        <span class="status-pill" :class="{ active: isSending }">
+        <span class="status-pill" :class="{ active: isSending, done: currentPhase === 'done', error: currentPhase === 'error' }">
           <Sparkles :size="13" />
-          {{ isSending ? '生成中' : '就绪' }}
+          {{ isSending ? assistantStatus : currentPhase === 'idle' ? '就绪' : assistantStatus }}
         </span>
+        <button class="icon-button" type="button" aria-label="New conversation" title="新会话" :disabled="isSending" @click="createNewConversation">
+          <Plus :size="18" />
+        </button>
+        <button
+          class="icon-button"
+          type="button"
+          aria-label="Conversation history"
+          title="历史会话"
+          :class="{ active: conversationPanelOpen }"
+          @click="conversationPanelOpen = !conversationPanelOpen"
+        >
+          <HistoryIcon :size="18" />
+        </button>
         <button class="icon-button" type="button" aria-label="Close chat" title="关闭" @click="hideChat">
           <X :size="18" />
         </button>
       </div>
     </header>
 
-    <section class="message-list" aria-live="polite">
+    <section v-if="conversationPanelOpen" class="conversation-panel">
+      <div class="conversation-panel-header">
+        <strong>历史会话</strong>
+        <button class="tool-button compact" type="button" :disabled="isSending" @click="startNewConversation">
+          <Plus :size="14" />
+          临时新会话
+        </button>
+      </div>
+      <div class="conversation-list">
+        <button
+          v-for="conversation in conversations"
+          :key="conversation.id"
+          class="conversation-item"
+          :class="{ active: conversation.id === currentConversationId }"
+          type="button"
+          :disabled="isSending"
+          @click="openConversation(conversation)"
+        >
+          <span>{{ conversation.title }}</span>
+          <small>{{ formatConversationTime(conversation.updatedAt) }}</small>
+        </button>
+        <p v-if="!conversationsLoading && conversations.length === 0" class="empty-conversation">暂无历史会话</p>
+        <p v-if="conversationsLoading" class="empty-conversation">加载中...</p>
+      </div>
+      <p v-if="errorText" class="error-text">{{ errorText }}</p>
+    </section>
+
+    <section ref="messageListRef" class="message-list" aria-live="polite">
       <article v-for="message in messages" :key="message.id" class="message-row" :class="message.role">
         <span v-if="message.role === 'assistant'" class="message-avatar" aria-hidden="true">
           <Bot :size="15" />
         </span>
         <div class="message">
-          <p>{{ message.content }}</p>
+          <MarkdownMessage v-if="message.role === 'assistant' && message.content" :content="message.content" />
+          <p v-else-if="message.role === 'user'">{{ message.content }}</p>
+          <div v-else class="message-progress">
+            <span class="typing-dots" aria-hidden="true">
+              <span />
+              <span />
+              <span />
+            </span>
+            <small>{{ phaseLabel(message.phase) || '准备中' }}</small>
+          </div>
+          <details v-if="message.role === 'assistant' && message.agentSteps?.length" class="agent-steps" :open="message.isStreaming">
+            <summary>
+              <Sparkles :size="13" />
+              <span>执行过程</span>
+              <small>{{ message.agentSteps.length }} 步</small>
+            </summary>
+            <ol>
+              <li v-for="step in message.agentSteps" :key="step.id" :class="{ failed: step.status === 'failed' }">
+                <div>
+                  <strong>{{ step.title }}</strong>
+                  <small>{{ stepTypeLabel(step.type) }} · {{ stepStatusLabel(step.status) }}</small>
+                </div>
+                <p v-if="step.content">{{ step.content }}</p>
+              </li>
+            </ol>
+          </details>
           <div v-if="message.sources?.length" class="sources">
-            <a v-for="source in message.sources" :key="source.url" :href="source.url" target="_blank">
-              {{ source.title }}
+            <a v-for="source in message.sources" :key="source.url" :href="source.url" target="_blank" rel="noreferrer">
+              <span>{{ source.title }}</span>
+              <small>{{ sourceLabel(source) }}</small>
             </a>
           </div>
           <div
-            v-if="message.realtimeSearchUsed || (message.model && message.role === 'assistant') || message.modelAvailable === false"
+            v-if="message.phase || message.realtimeSearchUsed || (message.model && message.role === 'assistant') || message.modelAvailable === false"
             class="message-meta"
           >
+            <small v-if="message.phase && message.role === 'assistant'">{{ phaseLabel(message.phase) }}</small>
             <small v-if="message.realtimeSearchUsed">实时检索</small>
             <small v-if="message.model && message.role === 'assistant'">{{ modelLabel(message.model) }}</small>
             <small v-if="message.modelAvailable === false">模型未连接或调用失败</small>
           </div>
-        </div>
-      </article>
-      <article v-if="isSending" class="message-row assistant">
-        <span class="message-avatar" aria-hidden="true">
-          <Bot :size="15" />
-        </span>
-        <div class="message typing">
-          <span />
-          <span />
-          <span />
         </div>
       </article>
     </section>
@@ -458,13 +967,17 @@ async function convertSelectedFile() {
 <style scoped>
 .chat-window {
   display: grid;
-  grid-template-rows: auto 1fr auto auto;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
   width: 100vw;
   height: 100vh;
   overflow: hidden;
   color: #172033;
   background: #f5f7fb;
   user-select: none;
+}
+
+.chat-window.has-conversations {
+  grid-template-rows: auto auto minmax(0, 1fr) auto auto;
 }
 
 .chat-header {
@@ -572,6 +1085,18 @@ async function convertSelectedFile() {
   border-color: rgba(245, 158, 11, 0.24);
 }
 
+.status-pill.done {
+  color: #0f766e;
+  background: rgba(20, 184, 166, 0.12);
+  border-color: rgba(20, 184, 166, 0.24);
+}
+
+.status-pill.error {
+  color: #b91c1c;
+  background: rgba(239, 68, 68, 0.12);
+  border-color: rgba(239, 68, 68, 0.24);
+}
+
 .icon-button {
   width: 32px;
   height: 32px;
@@ -586,6 +1111,99 @@ async function convertSelectedFile() {
   color: #ef4444;
   background: #fff1f2;
   border-color: rgba(239, 68, 68, 0.24);
+}
+
+.icon-button.active {
+  color: #2563eb;
+  background: #eff6ff;
+  border-color: rgba(37, 99, 235, 0.28);
+}
+
+.icon-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.conversation-panel {
+  display: grid;
+  gap: 10px;
+  max-height: 210px;
+  padding: 12px 14px;
+  border-bottom: 1px solid rgba(103, 119, 150, 0.14);
+  background: rgba(248, 250, 252, 0.96);
+  overflow: hidden;
+}
+
+.conversation-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.conversation-panel-header strong {
+  color: #172033;
+  font-size: 13px;
+}
+
+.tool-button.compact {
+  min-height: 28px;
+  padding: 0 9px;
+  border-radius: 999px;
+  font-size: 12px;
+}
+
+.conversation-list {
+  display: grid;
+  gap: 6px;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.conversation-item {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 36px;
+  padding: 7px 9px;
+  border: 1px solid rgba(103, 119, 150, 0.14);
+  border-radius: 10px;
+  color: #344057;
+  background: #ffffff;
+  font: inherit;
+  text-align: left;
+}
+
+.conversation-item span {
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-item small {
+  color: #7a8598;
+  font-size: 11px;
+}
+
+.conversation-item:hover,
+.conversation-item.active {
+  color: #1d4ed8;
+  background: #eff6ff;
+  border-color: rgba(37, 99, 235, 0.24);
+}
+
+.conversation-item:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.empty-conversation {
+  margin: 6px 2px;
+  color: #7a8598;
+  font-size: 12px;
 }
 
 .message-list {
@@ -638,6 +1256,106 @@ async function convertSelectedFile() {
   line-height: 1.58;
 }
 
+.message-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 24px;
+  color: #64748b;
+}
+
+.message-progress small {
+  font-size: 12px;
+}
+
+.agent-steps {
+  margin-top: 9px;
+  border: 1px solid rgba(20, 184, 166, 0.18);
+  border-radius: 12px;
+  background: rgba(240, 253, 250, 0.72);
+  overflow: hidden;
+}
+
+.agent-steps summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  padding: 0 9px;
+  color: #0f766e;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.agent-steps summary::-webkit-details-marker {
+  display: none;
+}
+
+.agent-steps summary span {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.agent-steps summary small {
+  margin-left: auto;
+  color: #64748b;
+  font-size: 11px;
+}
+
+.agent-steps ol {
+  display: grid;
+  gap: 6px;
+  max-height: 220px;
+  margin: 0;
+  padding: 8px 9px 9px 28px;
+  overflow-y: auto;
+  border-top: 1px solid rgba(20, 184, 166, 0.14);
+}
+
+.agent-steps li {
+  color: #344057;
+  font-size: 12px;
+}
+
+.agent-steps li.failed {
+  color: #b91c1c;
+}
+
+.agent-steps li div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.agent-steps li strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-steps li small {
+  flex: 0 0 auto;
+  color: #64748b;
+  font-size: 11px;
+}
+
+.agent-steps li p {
+  display: -webkit-box;
+  max-height: 74px;
+  margin: 3px 0 0;
+  overflow: hidden;
+  color: #526075;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
 .message-row.user .message {
   color: #ffffff;
   border-color: #2563eb;
@@ -657,10 +1375,17 @@ async function convertSelectedFile() {
 }
 
 .sources a {
+  display: grid;
+  gap: 2px;
   color: #2563eb;
   font-size: 12px;
   text-decoration: none;
   user-select: text;
+}
+
+.sources a small {
+  color: #64748b;
+  font-size: 11px;
 }
 
 .message-row.user .sources a {
@@ -694,15 +1419,20 @@ async function convertSelectedFile() {
   background: rgba(255, 255, 255, 0.18);
 }
 
-.typing {
+.typing,
+.typing-dots {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+}
+
+.typing {
   min-width: 56px;
   min-height: 38px;
 }
 
-.typing span {
+.typing span,
+.typing-dots span {
   width: 6px;
   height: 6px;
   border-radius: 999px;
@@ -710,11 +1440,13 @@ async function convertSelectedFile() {
   animation: typing-dot 900ms ease-in-out infinite;
 }
 
-.typing span:nth-child(2) {
+.typing span:nth-child(2),
+.typing-dots span:nth-child(2) {
   animation-delay: 120ms;
 }
 
-.typing span:nth-child(3) {
+.typing span:nth-child(3),
+.typing-dots span:nth-child(3) {
   animation-delay: 240ms;
 }
 

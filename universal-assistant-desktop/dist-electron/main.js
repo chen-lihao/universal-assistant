@@ -1,4 +1,4 @@
-import { app, BrowserWindow, screen, Menu, ipcMain, dialog } from "electron";
+import { app, BrowserWindow, screen, Menu, ipcMain, dialog, shell } from "electron";
 import { readFile, stat, writeFile, access } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -12,12 +12,23 @@ process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL ? path.join(process.env.APP_ROOT, 
 const BACKEND_URL = process.env["ASSISTANT_BACKEND_URL"] || "http://localhost:8080";
 const MAX_TEXT_FILE_SIZE = 5 * 1024 * 1024;
 const WINDOW_GAP = 14;
+const CHAT_WINDOW_WIDTH = 440;
+const CHAT_WINDOW_HEIGHT = 640;
+const CHAT_WINDOW_MIN_WIDTH = 380;
+const CHAT_WINDOW_MIN_HEIGHT = 520;
+const PET_WINDOW_WIDTH = 320;
+const PET_WINDOW_HEIGHT = 360;
 const FOLLOW_STEP_MS = 16;
 const FOLLOW_STIFFNESS = 0.2;
-const ROAM_MIN_DELAY_MS = 8e3;
-const ROAM_MAX_DELAY_MS = 2e4;
+const ROAM_MIN_DELAY_MS = 2e4;
+const ROAM_MAX_DELAY_MS = 3e4;
 const ROAM_MIN_DURATION_MS = 900;
-const ROAM_MAX_DURATION_MS = 1800;
+const ROAM_MAX_DURATION_MS = 1300;
+const ROAM_RANGE_X = 36;
+const ROAM_RANGE_Y = 82;
+const ROAM_MIN_DISTANCE_Y = 42;
+const CHAT_TRANSITION_MS = 230;
+const CHAT_COLLAPSED_SIZE = 92;
 const TEXT_EXTENSIONS = /* @__PURE__ */ new Set([
   ".txt",
   ".md",
@@ -49,6 +60,7 @@ let petManualControlUntil = 0;
 let petPointerActive = false;
 let petRoamTimer = null;
 const windowAnimationTimers = /* @__PURE__ */ new Map();
+const windowOpacityTimers = /* @__PURE__ */ new Map();
 const grantedFiles = /* @__PURE__ */ new Set();
 const grantedDirectories = /* @__PURE__ */ new Set();
 function createWindowOptions() {
@@ -77,13 +89,43 @@ function loadRenderer(window, view) {
   }
   void window.loadFile(target.file, { query: target.query });
 }
+function isRendererDevUrl(url) {
+  if (!VITE_DEV_SERVER_URL) {
+    return false;
+  }
+  try {
+    return new URL(url).origin === new URL(VITE_DEV_SERVER_URL).origin;
+  } catch {
+    return false;
+  }
+}
+function openExternalUrl(url) {
+  if (!/^https?:\/\//i.test(url) || isRendererDevUrl(url)) {
+    return false;
+  }
+  void shell.openExternal(url);
+  return true;
+}
+function registerExternalLinkHandling(window) {
+  window.webContents.setWindowOpenHandler(({ url }) => {
+    if (openExternalUrl(url)) {
+      return { action: "deny" };
+    }
+    return { action: "allow" };
+  });
+  window.webContents.on("will-navigate", (event, url) => {
+    if (openExternalUrl(url)) {
+      event.preventDefault();
+    }
+  });
+}
 function createPetWindow() {
   const workArea = screen.getPrimaryDisplay().workArea;
   petWindow = new BrowserWindow({
-    width: 168,
-    height: 196,
-    x: workArea.x + workArea.width - 220,
-    y: workArea.y + workArea.height - 260,
+    width: PET_WINDOW_WIDTH,
+    height: PET_WINDOW_HEIGHT,
+    x: workArea.x + workArea.width - PET_WINDOW_WIDTH - 48,
+    y: workArea.y + workArea.height - PET_WINDOW_HEIGHT - 48,
     frame: false,
     transparent: true,
     resizable: false,
@@ -110,6 +152,7 @@ function createPetWindow() {
   petWindow.on("closed", () => {
     stopPetFollow();
     cancelPetRoam();
+    cancelWindowOpacityAnimation(petWindow);
     clearMoveSyncSuppressions();
     petWindow = null;
   });
@@ -117,10 +160,10 @@ function createPetWindow() {
 }
 function createChatWindow() {
   chatWindow = new BrowserWindow({
-    width: 440,
-    height: 640,
-    minWidth: 380,
-    minHeight: 520,
+    width: CHAT_WINDOW_WIDTH,
+    height: CHAT_WINDOW_HEIGHT,
+    minWidth: CHAT_WINDOW_MIN_WIDTH,
+    minHeight: CHAT_WINDOW_MIN_HEIGHT,
     frame: false,
     transparent: false,
     resizable: true,
@@ -131,6 +174,7 @@ function createChatWindow() {
   });
   chatWindow.setMenuBarVisibility(false);
   registerEditorContextMenu(chatWindow);
+  registerExternalLinkHandling(chatWindow);
   chatWindow.on("show", () => {
     cancelPetRoam();
     stopPetFollow();
@@ -144,6 +188,10 @@ function createChatWindow() {
   chatWindow.on("closed", () => {
     stopPetFollow();
     clearMoveSyncSuppressions();
+    if (chatWindow) {
+      cancelWindowAnimation(chatWindow);
+      cancelWindowOpacityAnimation(chatWindow);
+    }
     chatWindow = null;
     schedulePetRoam();
   });
@@ -174,6 +222,13 @@ function cancelWindowAnimation(window) {
     windowAnimationTimers.delete(window.id);
   }
 }
+function cancelWindowOpacityAnimation(window) {
+  const timer = windowOpacityTimers.get(window.id);
+  if (timer) {
+    clearTimeout(timer);
+    windowOpacityTimers.delete(window.id);
+  }
+}
 function suppressMoveSyncFor(window) {
   if (window === petWindow) {
     suppressPetMoveSync = true;
@@ -200,6 +255,15 @@ function suppressMoveSyncFor(window) {
 function setWindowPosition(window, x, y) {
   suppressMoveSyncFor(window);
   window.setPosition(Math.round(x), Math.round(y));
+}
+function setWindowBounds(window, bounds) {
+  suppressMoveSyncFor(window);
+  window.setBounds({
+    x: Math.round(bounds.x),
+    y: Math.round(bounds.y),
+    width: Math.round(bounds.width),
+    height: Math.round(bounds.height)
+  });
 }
 function easeOutCubic(progress) {
   return 1 - Math.pow(1 - progress, 3);
@@ -234,6 +298,98 @@ function animateWindowTo(window, targetX, targetY, duration = 180, onComplete) {
       return;
     }
     windowAnimationTimers.set(window.id, setTimeout(tick, 16));
+  };
+  tick();
+}
+function animateWindowBounds(window, target, duration = 180, onComplete) {
+  cancelWindowAnimation(window);
+  if (window.isDestroyed()) {
+    return;
+  }
+  const start = window.getBounds();
+  const startedAt = Date.now();
+  const tick = () => {
+    if (window.isDestroyed()) {
+      windowAnimationTimers.delete(window.id);
+      return;
+    }
+    const progress = clamp((Date.now() - startedAt) / duration, 0, 1);
+    const eased = easeOutCubic(progress);
+    setWindowBounds(window, {
+      x: start.x + (target.x - start.x) * eased,
+      y: start.y + (target.y - start.y) * eased,
+      width: start.width + (target.width - start.width) * eased,
+      height: start.height + (target.height - start.height) * eased
+    });
+    if (progress >= 1) {
+      windowAnimationTimers.delete(window.id);
+      onComplete == null ? void 0 : onComplete();
+      return;
+    }
+    windowAnimationTimers.set(window.id, setTimeout(tick, 16));
+  };
+  tick();
+}
+function animateWindowPath(window, points, onComplete) {
+  cancelWindowAnimation(window);
+  if (window.isDestroyed() || points.length === 0) {
+    onComplete == null ? void 0 : onComplete();
+    return;
+  }
+  let index = 0;
+  const runSegment = () => {
+    if (window.isDestroyed()) {
+      windowAnimationTimers.delete(window.id);
+      return;
+    }
+    const point = points[index];
+    const start = window.getBounds();
+    const startedAt = Date.now();
+    const tick = () => {
+      if (window.isDestroyed()) {
+        windowAnimationTimers.delete(window.id);
+        return;
+      }
+      const progress = clamp((Date.now() - startedAt) / point.duration, 0, 1);
+      const eased = easeOutCubic(progress);
+      setWindowPosition(window, start.x + (point.x - start.x) * eased, start.y + (point.y - start.y) * eased);
+      if (progress >= 1) {
+        index += 1;
+        if (index >= points.length) {
+          windowAnimationTimers.delete(window.id);
+          onComplete == null ? void 0 : onComplete();
+          return;
+        }
+        runSegment();
+        return;
+      }
+      windowAnimationTimers.set(window.id, setTimeout(tick, 16));
+    };
+    tick();
+  };
+  runSegment();
+}
+function animateWindowOpacity(window, targetOpacity, duration = 180, onComplete) {
+  cancelWindowOpacityAnimation(window);
+  if (window.isDestroyed()) {
+    return;
+  }
+  const startOpacity = window.getOpacity();
+  const startedAt = Date.now();
+  const tick = () => {
+    if (window.isDestroyed()) {
+      windowOpacityTimers.delete(window.id);
+      return;
+    }
+    const progress = clamp((Date.now() - startedAt) / duration, 0, 1);
+    const eased = easeOutCubic(progress);
+    const nextOpacity = startOpacity + (targetOpacity - startOpacity) * eased;
+    window.setOpacity(nextOpacity);
+    if (progress >= 1) {
+      windowOpacityTimers.delete(window.id);
+      return;
+    }
+    windowOpacityTimers.set(window.id, setTimeout(tick, 16));
   };
   tick();
 }
@@ -317,21 +473,195 @@ function canPetRoam() {
     petWindow && !petWindow.isDestroyed() && !(chatWindow == null ? void 0 : chatWindow.isVisible()) && !petPointerActive && Date.now() >= petManualControlUntil
   );
 }
-function cancelPetRoam() {
+function clearPetRoamTimer() {
   if (petRoamTimer) {
     clearTimeout(petRoamTimer);
     petRoamTimer = null;
   }
+}
+function cancelPetRoam() {
+  clearPetRoamTimer();
   if (petWindow) {
     cancelWindowAnimation(petWindow);
   }
 }
-function schedulePetRoam() {
-  cancelPetRoam();
-  if (!canPetRoam()) {
+function schedulePetRoam(delay) {
+  clearPetRoamTimer();
+  if (!petWindow || petWindow.isDestroyed() || (chatWindow == null ? void 0 : chatWindow.isVisible()) || petPointerActive) {
     return;
   }
-  petRoamTimer = setTimeout(startPetRoam, randomBetween(ROAM_MIN_DELAY_MS, ROAM_MAX_DELAY_MS));
+  const cooldownDelay = Math.max(0, petManualControlUntil - Date.now());
+  const roamDelay = Math.max(0, randomBetween(ROAM_MIN_DELAY_MS, ROAM_MAX_DELAY_MS));
+  petRoamTimer = setTimeout(startPetRoam, cooldownDelay + roamDelay);
+}
+function getPetMotionTarget(rangeX, rangeY) {
+  if (!petWindow) {
+    return null;
+  }
+  const petBounds = petWindow.getBounds();
+  const workArea = screen.getDisplayMatching(petBounds).workArea;
+  return {
+    x: Math.round(
+      clamp(
+        petBounds.x + randomBetween(-rangeX, rangeX),
+        workArea.x + WINDOW_GAP,
+        workArea.x + workArea.width - petBounds.width - WINDOW_GAP
+      )
+    ),
+    y: Math.round(
+      clamp(
+        petBounds.y + randomBetween(-rangeY, rangeY),
+        workArea.y + WINDOW_GAP,
+        workArea.y + workArea.height - petBounds.height - WINDOW_GAP
+      )
+    )
+  };
+}
+function getPetRoamTarget() {
+  if (!petWindow) {
+    return null;
+  }
+  const petBounds = petWindow.getBounds();
+  const workArea = screen.getDisplayMatching(petBounds).workArea;
+  const minX = workArea.x + WINDOW_GAP;
+  const maxX = workArea.x + workArea.width - petBounds.width - WINDOW_GAP;
+  const minY = workArea.y + WINDOW_GAP;
+  const maxY = workArea.y + workArea.height - petBounds.height - WINDOW_GAP;
+  const canMoveDown = petBounds.y + ROAM_MIN_DISTANCE_Y <= maxY;
+  const canMoveUp = petBounds.y - ROAM_MIN_DISTANCE_Y >= minY;
+  let directionY = Math.random() > 0.5 ? 1 : -1;
+  if (!canMoveDown && canMoveUp) {
+    directionY = -1;
+  } else if (!canMoveUp && canMoveDown) {
+    directionY = 1;
+  }
+  const distanceY = randomBetween(ROAM_MIN_DISTANCE_Y, ROAM_RANGE_Y);
+  let targetY = clamp(petBounds.y + directionY * distanceY, minY, maxY);
+  if (Math.abs(targetY - petBounds.y) < ROAM_MIN_DISTANCE_Y && (canMoveDown || canMoveUp)) {
+    targetY = clamp(petBounds.y - directionY * distanceY, minY, maxY);
+  }
+  const directionX = Math.random() > 0.5 ? 1 : -1;
+  const distanceX = randomBetween(12, ROAM_RANGE_X);
+  let targetX = clamp(petBounds.x + directionX * distanceX, minX, maxX);
+  if (Math.abs(targetX - petBounds.x) < 8) {
+    targetX = clamp(petBounds.x - directionX * distanceX, minX, maxX);
+  }
+  return {
+    x: Math.round(targetX),
+    y: Math.round(targetY)
+  };
+}
+function performPetMotion(payload) {
+  const force = Boolean(payload == null ? void 0 : payload.force);
+  if (!petWindow || !force && !canPetRoam()) {
+    return;
+  }
+  cancelPetRoam();
+  if (force) {
+    stopPetFollow();
+  }
+  const type = (payload == null ? void 0 : payload.type) || "vertical-run";
+  const start = petWindow.getBounds();
+  const workArea = screen.getDisplayMatching(start).workArea;
+  const finish = (state = "idle", delay = 900) => {
+    if (!force && !canPetRoam()) {
+      return;
+    }
+    setPetState(state);
+    setTimeout(() => {
+      if (!petWindow || petWindow.isDestroyed() || (chatWindow == null ? void 0 : chatWindow.isVisible()) || petPointerActive) {
+        return;
+      }
+      setPetState("idle");
+      schedulePetRoam();
+    }, delay);
+  };
+  if (type === "jump") {
+    setPetState("happy");
+    const jumpHeight = clamp(Number((payload == null ? void 0 : payload.rangeY) ?? 112), 60, 150);
+    const peakY = clamp(start.y - jumpHeight, workArea.y + WINDOW_GAP, workArea.y + workArea.height - start.height - WINDOW_GAP);
+    animateWindowPath(
+      petWindow,
+      [
+        { x: start.x, y: peakY, duration: 320 },
+        { x: start.x, y: start.y, duration: 460 }
+      ],
+      () => finish("happy", 700)
+    );
+    return;
+  }
+  if (type === "dash") {
+    setPetState("running");
+    const direction = start.x + start.width / 2 < workArea.x + workArea.width / 2 ? 1 : -1;
+    const dashDistance = clamp(Number((payload == null ? void 0 : payload.rangeX) ?? 140), 80, 180);
+    const targetX = clamp(
+      start.x + direction * dashDistance,
+      workArea.x + WINDOW_GAP,
+      workArea.x + workArea.width - start.width - WINDOW_GAP
+    );
+    const targetY = clamp(
+      start.y + randomBetween(-28, 28),
+      workArea.y + WINDOW_GAP,
+      workArea.y + workArea.height - start.height - WINDOW_GAP
+    );
+    animateWindowPath(
+      petWindow,
+      [
+        { x: start.x + direction * 18, y: start.y - 14, duration: 140 },
+        { x: targetX, y: targetY, duration: 640 },
+        { x: targetX - direction * 18, y: targetY + 8, duration: 220 }
+      ],
+      () => finish("happy", 700)
+    );
+    return;
+  }
+  const rangeX = clamp(Number((payload == null ? void 0 : payload.rangeX) ?? ROAM_RANGE_X), 0, 120);
+  const rangeY = clamp(Number((payload == null ? void 0 : payload.rangeY) ?? ROAM_RANGE_Y), 0, 180);
+  const duration = Math.round(clamp(Number((payload == null ? void 0 : payload.duration) ?? 1050), 360, 2200));
+  const target = getPetMotionTarget(rangeX, rangeY);
+  if (!target) {
+    return;
+  }
+  setPetState("running");
+  animateWindowTo(petWindow, target.x, target.y, duration, () => finish("happy", 900));
+}
+function performPetRoamMotion() {
+  if (!petWindow || !canPetRoam()) {
+    return;
+  }
+  cancelPetRoam();
+  const start = petWindow.getBounds();
+  const target = getPetRoamTarget();
+  if (!target) {
+    return;
+  }
+  const duration = Math.round(randomBetween(ROAM_MIN_DURATION_MS, ROAM_MAX_DURATION_MS));
+  const liftY = target.y < start.y ? -14 : 10;
+  const midPoint = {
+    x: Math.round(start.x + (target.x - start.x) * 0.42),
+    y: Math.round(start.y + (target.y - start.y) * 0.42 + liftY)
+  };
+  setPetState("running");
+  animateWindowPath(
+    petWindow,
+    [
+      { x: midPoint.x, y: midPoint.y, duration: Math.round(duration * 0.38) },
+      { x: target.x, y: target.y, duration: Math.round(duration * 0.62) }
+    ],
+    () => {
+      if (!petWindow || petWindow.isDestroyed() || (chatWindow == null ? void 0 : chatWindow.isVisible()) || petPointerActive) {
+        return;
+      }
+      setPetState("happy");
+      setTimeout(() => {
+        if (!petWindow || petWindow.isDestroyed() || (chatWindow == null ? void 0 : chatWindow.isVisible()) || petPointerActive) {
+          return;
+        }
+        setPetState("idle");
+        schedulePetRoam();
+      }, 760);
+    }
+  );
 }
 function startPetRoam() {
   petRoamTimer = null;
@@ -339,29 +669,11 @@ function startPetRoam() {
     schedulePetRoam();
     return;
   }
-  const petBounds = petWindow.getBounds();
-  const workArea = screen.getDisplayMatching(petBounds).workArea;
-  const x = Math.round(randomBetween(workArea.x + WINDOW_GAP, workArea.x + workArea.width - petBounds.width - WINDOW_GAP));
-  const y = Math.round(randomBetween(workArea.y + WINDOW_GAP, workArea.y + workArea.height - petBounds.height - WINDOW_GAP));
-  const duration = Math.round(randomBetween(ROAM_MIN_DURATION_MS, ROAM_MAX_DURATION_MS));
-  setPetState("running");
-  animateWindowTo(petWindow, x, y, duration, () => {
-    if (!canPetRoam()) {
-      return;
-    }
-    const nextState = Math.random() > 0.55 ? "curious" : Math.random() > 0.35 ? "happy" : "sleepy";
-    setPetState(nextState);
-    setTimeout(() => {
-      if (canPetRoam()) {
-        setPetState("idle");
-        schedulePetRoam();
-      }
-    }, Math.round(randomBetween(1200, 2600)));
-  });
+  performPetRoamMotion();
 }
-function positionChatWindow(options = {}) {
+function getChatWindowPosition() {
   if (!petWindow || !chatWindow) {
-    return;
+    return null;
   }
   const petBounds = petWindow.getBounds();
   const chatBounds = chatWindow.getBounds();
@@ -375,12 +687,114 @@ function positionChatWindow(options = {}) {
     workArea.y + WINDOW_GAP,
     workArea.y + workArea.height - chatBounds.height - WINDOW_GAP
   );
-  moveWindowTo(
-    chatWindow,
-    clamp(x, workArea.x + WINDOW_GAP, workArea.x + workArea.width - chatBounds.width - WINDOW_GAP),
-    y,
-    Boolean(options.animated)
-  );
+  return {
+    x: clamp(x, workArea.x + WINDOW_GAP, workArea.x + workArea.width - chatBounds.width - WINDOW_GAP),
+    y
+  };
+}
+function getChatWindowTargetBounds() {
+  if (!chatWindow) {
+    return null;
+  }
+  const position = getChatWindowPosition();
+  if (!position) {
+    return null;
+  }
+  const bounds = chatWindow.getBounds();
+  const width = Math.max(bounds.width, CHAT_WINDOW_MIN_WIDTH);
+  const height = Math.max(bounds.height, CHAT_WINDOW_MIN_HEIGHT);
+  return {
+    x: position.x,
+    y: position.y,
+    width,
+    height
+  };
+}
+function getChatCollapsedBounds() {
+  if (!petWindow || !chatWindow) {
+    return null;
+  }
+  const petBounds = petWindow.getBounds();
+  const workArea = screen.getDisplayMatching(petBounds).workArea;
+  const size = CHAT_COLLAPSED_SIZE;
+  return {
+    x: Math.round(
+      clamp(
+        petBounds.x + petBounds.width / 2 - size / 2,
+        workArea.x + WINDOW_GAP,
+        workArea.x + workArea.width - size - WINDOW_GAP
+      )
+    ),
+    y: Math.round(
+      clamp(
+        petBounds.y + petBounds.height / 2 - size / 2,
+        workArea.y + WINDOW_GAP,
+        workArea.y + workArea.height - size - WINDOW_GAP
+      )
+    ),
+    width: size,
+    height: size
+  };
+}
+function positionChatWindow(options = {}) {
+  if (!chatWindow) {
+    return;
+  }
+  const position = getChatWindowPosition();
+  if (!position) {
+    return;
+  }
+  moveWindowTo(chatWindow, position.x, position.y, Boolean(options.animated));
+}
+function showChatWindowAnimated() {
+  if (!chatWindow) {
+    return;
+  }
+  const target = getChatWindowTargetBounds();
+  const collapsed = getChatCollapsedBounds();
+  if (!target || !collapsed) {
+    return;
+  }
+  cancelWindowAnimation(chatWindow);
+  cancelWindowOpacityAnimation(chatWindow);
+  chatWindow.setMinimumSize(1, 1);
+  setWindowBounds(chatWindow, collapsed);
+  chatWindow.setOpacity(0.72);
+  chatWindow.show();
+  chatWindow.focus();
+  animateWindowBounds(chatWindow, target, CHAT_TRANSITION_MS, () => {
+    chatWindow == null ? void 0 : chatWindow.setMinimumSize(CHAT_WINDOW_MIN_WIDTH, CHAT_WINDOW_MIN_HEIGHT);
+  });
+  animateWindowOpacity(chatWindow, 1, CHAT_TRANSITION_MS);
+}
+function hideChatWindowAnimated() {
+  if (!chatWindow || !chatWindow.isVisible()) {
+    return;
+  }
+  const start = chatWindow.getBounds();
+  const collapsed = getChatCollapsedBounds();
+  if (!collapsed) {
+    chatWindow.hide();
+    return;
+  }
+  cancelWindowAnimation(chatWindow);
+  cancelWindowOpacityAnimation(chatWindow);
+  chatWindow.setMinimumSize(1, 1);
+  animateWindowBounds(chatWindow, collapsed, CHAT_TRANSITION_MS, () => {
+    if (!chatWindow || chatWindow.isDestroyed()) {
+      return;
+    }
+    chatWindow.hide();
+    setWindowBounds(chatWindow, {
+      x: start.x,
+      y: start.y,
+      width: Math.max(start.width, CHAT_WINDOW_MIN_WIDTH),
+      height: Math.max(start.height, CHAT_WINDOW_MIN_HEIGHT)
+    });
+    chatWindow.setMinimumSize(CHAT_WINDOW_MIN_WIDTH, CHAT_WINDOW_MIN_HEIGHT);
+    chatWindow.setOpacity(1);
+  });
+  animateWindowOpacity(chatWindow, 0.18, CHAT_TRANSITION_MS);
 }
 function syncChatWindowToPetWindow() {
   if (suppressPetMoveSync || !(chatWindow == null ? void 0 : chatWindow.isVisible())) {
@@ -431,17 +845,14 @@ function toggleChatWindow() {
     return;
   }
   if (chatWindow.isVisible()) {
-    chatWindow.hide();
     setPetState("idle");
-    schedulePetRoam();
+    hideChatWindowAnimated();
     return;
   }
   cancelPetRoam();
   stopPetFollow();
   setPetState("idle");
-  positionChatWindow({ animated: true });
-  chatWindow.show();
-  chatWindow.focus();
+  showChatWindowAnimated();
 }
 function sendCurrentPetState() {
   if (!petWindow || petWindow.isDestroyed()) {
@@ -449,12 +860,135 @@ function sendCurrentPetState() {
   }
   petWindow.webContents.send("assistant:pet-state", currentPetState);
 }
+function sendPetAction(action) {
+  if (!petWindow || petWindow.isDestroyed()) {
+    return;
+  }
+  petWindow.webContents.send("assistant:pet-action", action);
+}
+function horizontalDirectionFromWindow(bounds, workArea) {
+  return bounds.x + bounds.width / 2 < workArea.x + workArea.width / 2 ? 1 : -1;
+}
+function resolveHorizontalTarget(start, workArea, distance) {
+  const minX = workArea.x + WINDOW_GAP;
+  const maxX = workArea.x + workArea.width - start.width - WINDOW_GAP;
+  let direction = horizontalDirectionFromWindow(start, workArea);
+  let targetX = clamp(start.x + direction * distance, minX, maxX);
+  if (Math.abs(targetX - start.x) < Math.min(52, distance * 0.48)) {
+    direction *= -1;
+    targetX = clamp(start.x + direction * distance, minX, maxX);
+  }
+  return { direction, targetX };
+}
+function performPetInteractionMotion(action) {
+  if (!petWindow || petWindow.isDestroyed()) {
+    return;
+  }
+  stopPetFollow();
+  cancelPetRoam();
+  petManualControlUntil = Date.now() + 1800;
+  const start = petWindow.getBounds();
+  const workArea = screen.getDisplayMatching(start).workArea;
+  if (action === "jump") {
+    setPetState("happy");
+    const { direction: direction2, targetX: targetX2 } = resolveHorizontalTarget(start, workArea, 78);
+    const targetY2 = clamp(
+      start.y + randomBetween(-18, 18),
+      workArea.y + WINDOW_GAP,
+      workArea.y + workArea.height - start.height - WINDOW_GAP
+    );
+    const peakY = clamp(start.y - 118, workArea.y + WINDOW_GAP, workArea.y + workArea.height - start.height - WINDOW_GAP);
+    animateWindowPath(
+      petWindow,
+      [
+        { x: start.x + direction2 * 28, y: peakY, duration: 260 },
+        { x: targetX2, y: targetY2, duration: 430 },
+        { x: targetX2 - direction2 * 6, y: targetY2 + 4, duration: 120 }
+      ],
+      () => {
+        setPetState("happy");
+        setTimeout(() => {
+          if (!(chatWindow == null ? void 0 : chatWindow.isVisible())) {
+            setPetState("idle");
+            schedulePetRoam();
+          }
+        }, 700);
+      }
+    );
+    return;
+  }
+  setPetState("running");
+  const { direction, targetX } = resolveHorizontalTarget(start, workArea, 178);
+  const targetY = clamp(
+    start.y + randomBetween(-34, 34),
+    workArea.y + WINDOW_GAP,
+    workArea.y + workArea.height - start.height - WINDOW_GAP
+  );
+  animateWindowPath(
+    petWindow,
+    [
+      { x: start.x + direction * 24, y: start.y - 12, duration: 120 },
+      { x: targetX, y: targetY, duration: 560 },
+      { x: targetX - direction * 12, y: targetY + 6, duration: 180 }
+    ],
+    () => {
+      setPetState("happy");
+      setTimeout(() => {
+        if (!(chatWindow == null ? void 0 : chatWindow.isVisible())) {
+          setPetState("idle");
+          schedulePetRoam();
+        }
+      }, 700);
+    }
+  );
+}
+function runPetMenuAction(action) {
+  sendPetAction(action);
+  if (action === "jump") {
+    setPetPointerActive(false);
+    setTimeout(() => performPetInteractionMotion("jump"), 30);
+    return;
+  }
+  if (action === "run") {
+    setPetPointerActive(false);
+    setTimeout(() => performPetInteractionMotion("run"), 30);
+    return;
+  }
+  if (action === "idle") {
+    setPetState("idle");
+  } else if (action === "sleep") {
+    setPetState("sleepy");
+  }
+  if (!(chatWindow == null ? void 0 : chatWindow.isVisible())) {
+    schedulePetRoam();
+  }
+}
 function setPetState(state) {
   if (state !== "idle" && state !== "thinking" && state !== "speaking" && state !== "happy" && state !== "curious" && state !== "sleepy" && state !== "running" && state !== "error") {
     return;
   }
   currentPetState = state;
   sendCurrentPetState();
+}
+function showPetMenu() {
+  if (!petWindow || petWindow.isDestroyed()) {
+    return;
+  }
+  const menu = Menu.buildFromTemplate([
+    { label: "打招呼 Wave", click: () => runPetMenuAction("wave") },
+    { label: "开心跳 Jump", click: () => runPetMenuAction("jump") },
+    { label: "放烟花 Fireworks", click: () => runPetMenuAction("fireworks") },
+    { label: "小跑一下 Run", click: () => runPetMenuAction("run") },
+    { type: "separator" },
+    { label: "睡觉 Sleep", click: () => runPetMenuAction("sleep") },
+    { label: "恢复空闲 Idle", click: () => runPetMenuAction("idle") }
+  ]);
+  menu.popup({
+    window: petWindow,
+    callback: () => {
+      setPetPointerActive(false);
+    }
+  });
 }
 function runEditAction(action, webContents) {
   var _a;
@@ -602,13 +1136,17 @@ ${content}`;
 function registerIpcHandlers() {
   ipcMain.handle("assistant:toggle-chat", () => toggleChatWindow());
   ipcMain.handle("assistant:hide-chat", () => {
-    chatWindow == null ? void 0 : chatWindow.hide();
     setPetState("idle");
-    schedulePetRoam();
+    hideChatWindowAnimated();
   });
   ipcMain.handle("assistant:get-backend-url", () => BACKEND_URL);
   ipcMain.handle("assistant:set-pet-state", (_event, state) => setPetState(state));
   ipcMain.handle("assistant:set-pet-pointer-active", (_event, active) => setPetPointerActive(active));
+  ipcMain.handle("assistant:show-pet-menu", () => showPetMenu());
+  ipcMain.handle(
+    "assistant:perform-pet-motion",
+    (_event, payload) => performPetMotion(payload)
+  );
   ipcMain.handle(
     "assistant:move-pet-by",
     (_event, payload) => movePetWindowBy(payload == null ? void 0 : payload.deltaX, payload == null ? void 0 : payload.deltaY)
