@@ -10,6 +10,7 @@ import com.hao.universalassistantbackend.model.ChatMessage;
 import com.hao.universalassistantbackend.model.ConversationMessageResponse;
 import com.hao.universalassistantbackend.model.ConversationMessagesResponse;
 import com.hao.universalassistantbackend.model.ConversationResponse;
+import com.hao.universalassistantbackend.model.MessageBlock;
 import com.hao.universalassistantbackend.model.SearchResult;
 import com.hao.universalassistantbackend.repository.ConversationRepository;
 import com.hao.universalassistantbackend.repository.MessageRepository;
@@ -33,6 +34,8 @@ public class ConversationService {
     private static final int TITLE_MAX_LENGTH = 40;
     private static final TypeReference<List<SearchResult>> SEARCH_RESULT_LIST = new TypeReference<>() {
     };
+    private static final TypeReference<List<MessageBlock>> MESSAGE_BLOCK_LIST = new TypeReference<>() {
+    };
 
     private record DisplayMessage(Instant createdAt, ConversationMessageResponse response) {
     }
@@ -42,6 +45,7 @@ public class ConversationService {
     private final ConversationSummaryRepository conversationSummaryRepository;
     private final AgentRunService agentRunService;
     private final MemoryService memoryService;
+    private final MessageBlockFactory messageBlockFactory;
     private final ObjectMapper objectMapper;
 
     public ConversationService(ConversationRepository conversationRepository,
@@ -49,12 +53,14 @@ public class ConversationService {
                                ConversationSummaryRepository conversationSummaryRepository,
                                AgentRunService agentRunService,
                                MemoryService memoryService,
+                               MessageBlockFactory messageBlockFactory,
                                ObjectMapper objectMapper) {
         this.conversationRepository = conversationRepository;
         this.messageRepository = messageRepository;
         this.conversationSummaryRepository = conversationSummaryRepository;
         this.agentRunService = agentRunService;
         this.memoryService = memoryService;
+        this.messageBlockFactory = messageBlockFactory;
         this.objectMapper = objectMapper;
     }
 
@@ -220,7 +226,7 @@ public class ConversationService {
                                               boolean realtimeSearchUsed,
                                               boolean modelAvailable,
                                               List<SearchResult> sources) {
-        return saveMessage(conversation, "assistant", content, model, realtimeSearchUsed, modelAvailable, sources, "completed");
+        return saveAssistantMessage(conversation, content, model, realtimeSearchUsed, modelAvailable, sources, "completed", List.of());
     }
 
     @Transactional
@@ -231,7 +237,19 @@ public class ConversationService {
                                               boolean modelAvailable,
                                               List<SearchResult> sources,
                                               String status) {
-        return saveMessage(conversation, "assistant", content, model, realtimeSearchUsed, modelAvailable, sources, status);
+        return saveAssistantMessage(conversation, content, model, realtimeSearchUsed, modelAvailable, sources, status, List.of());
+    }
+
+    @Transactional
+    public MessageEntity saveAssistantMessage(ConversationEntity conversation,
+                                              String content,
+                                              String model,
+                                              boolean realtimeSearchUsed,
+                                              boolean modelAvailable,
+                                              List<SearchResult> sources,
+                                              String status,
+                                              List<MessageBlock> contentBlocks) {
+        return saveMessage(conversation, "assistant", content, model, realtimeSearchUsed, modelAvailable, sources, status, contentBlocks);
     }
 
     @Transactional
@@ -278,6 +296,18 @@ public class ConversationService {
                                       Boolean modelAvailable,
                                       List<SearchResult> sources,
                                       String status) {
+        return saveMessage(conversation, role, content, model, realtimeSearchUsed, modelAvailable, sources, status, List.of());
+    }
+
+    private MessageEntity saveMessage(ConversationEntity conversation,
+                                      String role,
+                                      String content,
+                                      String model,
+                                      Boolean realtimeSearchUsed,
+                                      Boolean modelAvailable,
+                                      List<SearchResult> sources,
+                                      String status,
+                                      List<MessageBlock> contentBlocks) {
         MessageEntity message = new MessageEntity();
         message.setConversation(conversation);
         message.setRole(role);
@@ -286,6 +316,7 @@ public class ConversationService {
         message.setRealtimeSearchUsed(realtimeSearchUsed);
         message.setModelAvailable(modelAvailable);
         message.setSourcesJson(writeSources(sources));
+        message.setContentBlocksJson(writeMessageBlocks(contentBlocks));
         message.setStatus(StringUtils.hasText(status) ? status : "completed");
 
         conversation.touch();
@@ -328,10 +359,12 @@ public class ConversationService {
                 sources = readSources(agentRunContext.run().getSourcesJson());
             }
         }
+        List<MessageBlock> contentBlocks = readMessageBlocks(message, agentRunContext, sources);
         return new ConversationMessageResponse(
                 message.getId(),
                 message.getRole(),
                 content,
+                contentBlocks,
                 message.getModel(),
                 realtimeSearchUsed,
                 modelAvailable,
@@ -353,14 +386,22 @@ public class ConversationService {
         String pendingToolInput = stringValue(pendingInput.get("query"));
         String pendingToolReason = stringValue(pendingInput.get("reason"));
         String content = recoverRunAnswer(agentRunContext);
+        List<SearchResult> sources = readSources(agentRunContext.run().getSourcesJson());
+        List<MessageBlock> contentBlocks = messageBlockFactory.legacyAssistantBlocks(
+                content,
+                agentRunContext,
+                sources,
+                agentRunContext.run().getStatus()
+        );
         return new ConversationMessageResponse(
                 agentRunContext.run().getId(),
                 "assistant",
                 content,
+                contentBlocks,
                 agentRunContext.run().getModel(),
                 agentRunContext.run().getRealtimeSearchUsed(),
                 agentRunContext.run().getModelAvailable(),
-                readSources(agentRunContext.run().getSourcesJson()),
+                sources,
                 agentRunContext.run().getStatus(),
                 1,
                 null,
@@ -403,6 +444,29 @@ public class ConversationService {
         return value == null ? null : String.valueOf(value);
     }
 
+    public List<MessageBlock> readMessageBlocks(MessageEntity message,
+                                                AgentRunContext agentRunContext,
+                                                List<SearchResult> sources) {
+        List<MessageBlock> blocks = readMessageBlocks(message == null ? null : message.getContentBlocksJson());
+        if (!blocks.isEmpty()) {
+            return blocks;
+        }
+        if (message == null || !"assistant".equals(message.getRole())) {
+            return List.of();
+        }
+
+        String content = message.getContent();
+        if (!StringUtils.hasText(content) && agentRunContext != null) {
+            content = recoverRunAnswer(agentRunContext);
+        }
+        return messageBlockFactory.legacyAssistantBlocks(
+                content,
+                agentRunContext,
+                sources == null ? List.of() : sources,
+                message.getStatus()
+        );
+    }
+
     private Optional<UUID> parseConversationId(String conversationId) {
         if (!StringUtils.hasText(conversationId)) {
             return Optional.empty();
@@ -442,6 +506,20 @@ public class ConversationService {
         }
     }
 
+    private String writeMessageBlocks(List<MessageBlock> blocks) {
+        if (blocks == null || blocks.isEmpty()) {
+            return "[]";
+        }
+
+        try {
+            return objectMapper.writeValueAsString(blocks);
+        } catch (RuntimeException ex) {
+            return "[]";
+        } catch (Exception ex) {
+            return "[]";
+        }
+    }
+
     private List<SearchResult> readSources(String sourcesJson) {
         if (!StringUtils.hasText(sourcesJson)) {
             return List.of();
@@ -449,6 +527,19 @@ public class ConversationService {
 
         try {
             return objectMapper.readValue(sourcesJson, SEARCH_RESULT_LIST);
+        } catch (Exception ex) {
+            return new ArrayList<>();
+        }
+    }
+
+    private List<MessageBlock> readMessageBlocks(String blocksJson) {
+        if (!StringUtils.hasText(blocksJson)) {
+            return List.of();
+        }
+
+        try {
+            List<MessageBlock> blocks = objectMapper.readValue(blocksJson, MESSAGE_BLOCK_LIST);
+            return blocks == null ? List.of() : blocks;
         } catch (Exception ex) {
             return new ArrayList<>();
         }

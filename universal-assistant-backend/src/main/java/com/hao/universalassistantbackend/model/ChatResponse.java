@@ -5,6 +5,7 @@ import java.util.UUID;
 
 public record ChatResponse(
         String answer,
+        List<MessageBlock> contentBlocks,
         boolean realtimeSearchUsed,
         boolean modelAvailable,
         String model,
@@ -20,7 +21,7 @@ public record ChatResponse(
                         boolean modelAvailable,
                         String model,
                         List<SearchResult> sources) {
-        this(answer, realtimeSearchUsed, modelAvailable, model, sources, null, null, null, List.of());
+        this(answer, List.of(), realtimeSearchUsed, modelAvailable, model, sources, null, null, null, List.of());
     }
 
     public ChatResponse(String answer,
@@ -30,6 +31,6 @@ public record ChatResponse(
                         List<SearchResult> sources,
                         UUID conversationId,
                         UUID messageId) {
-        this(answer, realtimeSearchUsed, modelAvailable, model, sources, conversationId, messageId, null, List.of());
+        this(answer, List.of(), realtimeSearchUsed, modelAvailable, model, sources, conversationId, messageId, null, List.of());
     }
 }

@@ -10,6 +10,66 @@ export type SearchResult = {
   provider?: string
 }
 
+export type MessageBlock =
+  | MarkdownBlock
+  | ExecutionBlock
+  | SourcesBlock
+  | StatusBlock
+  | ErrorBlock
+  | ToolCallBlock
+  | ToolResultBlock
+
+export type MarkdownBlock = {
+  id: string
+  type: 'markdown'
+  content: string
+  streaming?: boolean
+}
+
+export type ExecutionBlock = {
+  id: string
+  type: 'execution'
+  runId?: string
+  steps: AgentStep[]
+  collapsed?: boolean
+}
+
+export type SourcesBlock = {
+  id: string
+  type: 'sources'
+  items: SearchResult[]
+}
+
+export type StatusBlock = {
+  id: string
+  type: 'status'
+  phase?: ChatStreamPhase
+  text: string
+}
+
+export type ErrorBlock = {
+  id: string
+  type: 'error'
+  message: string
+  recoverable?: boolean
+}
+
+export type ToolCallBlock = {
+  id: string
+  type: 'tool_call'
+  name: string
+  input?: unknown
+  status?: string
+}
+
+export type ToolResultBlock = {
+  id: string
+  type: 'tool_result'
+  name: string
+  content: string
+  metadata?: unknown
+}
+
 export type ChatRequest = {
   message: string
   realtimeSearch?: boolean
@@ -23,6 +83,7 @@ export type ChatRequest = {
 
 export type ChatResponse = {
   answer: string
+  contentBlocks?: MessageBlock[]
   realtimeSearchUsed: boolean
   modelAvailable: boolean
   model?: string
@@ -57,7 +118,18 @@ export type AgentStep = {
 }
 
 export type ChatStreamEvent = {
-  type: 'status' | 'meta' | 'agent_step' | 'tool_confirmation_required' | 'answer_reset' | 'delta' | 'done' | 'error'
+  type:
+    | 'status'
+    | 'meta'
+    | 'agent_step'
+    | 'tool_confirmation_required'
+    | 'answer_reset'
+    | 'block_start'
+    | 'block_delta'
+    | 'block_end'
+    | 'delta'
+    | 'done'
+    | 'error'
   phase?: ChatStreamPhase
   message?: string
   content?: string
@@ -73,6 +145,8 @@ export type ChatStreamEvent = {
   toolName?: string
   toolInput?: string
   reason?: string
+  block?: MessageBlock
+  blockId?: string
 }
 
 export type ChatStreamHandlers = {
@@ -90,6 +164,7 @@ export type ConversationMessage = {
   id: string
   role: 'user' | 'assistant' | 'system'
   content: string
+  contentBlocks?: MessageBlock[]
   model?: string
   realtimeSearchUsed?: boolean
   modelAvailable?: boolean

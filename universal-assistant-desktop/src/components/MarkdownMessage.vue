@@ -22,6 +22,36 @@ function isTableSeparator(line: string) {
   return /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(line.trim())
 }
 
+function tableColumnCount(line: string) {
+  const trimmed = line.trim()
+  if (!trimmed.includes('|')) {
+    return 0
+  }
+
+  const normalized = trimmed.startsWith('|') ? trimmed : `|${trimmed}`
+  const cells = normalized.split('|').slice(1, normalized.endsWith('|') ? -1 : undefined)
+  return cells.length
+}
+
+function splitAttachedTableHeader(line: string, separatorLine: string) {
+  const trimmed = line.trimEnd()
+  if (!trimmed.endsWith('|') || trimmed.trimStart().startsWith('|')) {
+    return null
+  }
+
+  const separatorColumns = tableColumnCount(separatorLine)
+  const pipeIndexes = [...trimmed.matchAll(/\|/g)].map((match) => match.index || 0)
+  for (const pipeIndex of pipeIndexes) {
+    const title = trimmed.slice(0, pipeIndex).trimEnd()
+    const header = trimmed.slice(pipeIndex).trim()
+    if (title && isTableLine(header) && tableColumnCount(header) === separatorColumns) {
+      return { title, header }
+    }
+  }
+
+  return null
+}
+
 function isHorizontalRule(line: string) {
   return /^\s{0,3}(-{3,}|\*{3,}|_{3,})\s*$/.test(line)
 }
@@ -46,7 +76,8 @@ function normalizeMarkdown(content: string) {
     return ''
   }
 
-  for (const rawLine of lines) {
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const rawLine = lines[lineIndex]
     let line = rawLine
     if (/^\s*```/.test(line) || /^\s*~~~/.test(line)) {
       inFence = !inFence
@@ -60,6 +91,16 @@ function normalizeMarkdown(content: string) {
         normalizedLines.push(headingTable[1].trimEnd())
         normalizedLines.push('')
         line = headingTable[2].trimStart()
+      }
+
+      if (isTableSeparator(line) && normalizedLines.length > 0) {
+        const previousIndex = normalizedLines.length - 1
+        const attachedHeader = splitAttachedTableHeader(normalizedLines[previousIndex], line)
+        if (attachedHeader) {
+          normalizedLines[previousIndex] = attachedHeader.title
+          pushBlankIfNeeded()
+          normalizedLines.push(attachedHeader.header)
+        }
       }
 
       if (isHorizontalRule(line)) {

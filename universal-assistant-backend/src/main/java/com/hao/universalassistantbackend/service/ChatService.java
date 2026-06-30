@@ -11,6 +11,7 @@ import com.hao.universalassistantbackend.model.ChatRequest;
 import com.hao.universalassistantbackend.model.ChatResponse;
 import com.hao.universalassistantbackend.model.ChatStreamEvent;
 import com.hao.universalassistantbackend.model.MemoryHit;
+import com.hao.universalassistantbackend.model.MessageBlock;
 import com.hao.universalassistantbackend.model.SearchResult;
 import com.hao.universalassistantbackend.model.WeatherPlan;
 import com.hao.universalassistantbackend.model.WeatherQuery;
@@ -69,6 +70,9 @@ public class ChatService {
             When search context is provided, use it and cite source links naturally.
             When weather tool context is provided, use it as the primary weather source and cite the source links naturally.
             For local file operations, explain the intended operation and remind the user that the desktop app must confirm writes.
+            Format user-facing answers as valid GitHub Flavored Markdown.
+            If using a table, put a blank line before and after it, keep the table header on its own line, and put the separator row immediately after the header.
+            Never attach a heading, time label, or sentence to the same line as a Markdown table header.
             You must not guess your underlying model. If asked about the current model, use only the runtime model metadata provided by the backend.
             Never claim to be Claude, GPT, Gemini, or another model unless the runtime model metadata explicitly says so.
             """;
@@ -81,6 +85,7 @@ public class ChatService {
     private final WeatherTools weatherTools;
     private final WeatherQueryPlanner weatherQueryPlanner;
     private final PendingAgentActionService pendingAgentActionService;
+    private final MessageBlockFactory messageBlockFactory;
     private final String dashScopeApiKey;
     private final int maxTokens;
 
@@ -92,6 +97,7 @@ public class ChatService {
                        WeatherTools weatherTools,
                        WeatherQueryPlanner weatherQueryPlanner,
                        PendingAgentActionService pendingAgentActionService,
+                       MessageBlockFactory messageBlockFactory,
                        @Value("${spring.ai.dashscope.api-key:}") String dashScopeApiKey,
                        @Value("${assistant.chat.max-tokens:2400}") int maxTokens) {
         this.chatClientProvider = chatClientProvider;
@@ -102,6 +108,7 @@ public class ChatService {
         this.weatherTools = weatherTools;
         this.weatherQueryPlanner = weatherQueryPlanner;
         this.pendingAgentActionService = pendingAgentActionService;
+        this.messageBlockFactory = messageBlockFactory;
         this.dashScopeApiKey = dashScopeApiKey;
         this.maxTokens = maxTokens;
     }
@@ -319,7 +326,9 @@ public class ChatService {
             MessageEntity savedMessage = saveAssistantMessageAndFinalize(conversation, pendingResolution.directAnswer(), selectedModel, false, modelAvailable, List.of(), runContext, message);
             emit(consumer, ChatStreamEvent.meta(selectedModel, false, modelAvailable, List.of(), conversation.getId(), savedMessage.getId(), userMessage.getId(), runContext.run().getId()));
             emit(consumer, ChatStreamEvent.status("answering", "回答中"));
-            emitChunkedDelta(consumer, pendingResolution.directAnswer());
+            String answerBlockId = beginMarkdownBlock(consumer);
+            emitChunkedAnswerDelta(consumer, answerBlockId, pendingResolution.directAnswer());
+            endMarkdownBlock(consumer, answerBlockId);
             emit(consumer, ChatStreamEvent.done());
             return;
         }
@@ -336,7 +345,9 @@ public class ChatService {
             MessageEntity savedMessage = saveAssistantMessageAndFinalize(conversation, answer, selectedModel, false, modelAvailable, List.of(), runContext, message);
             emit(consumer, ChatStreamEvent.meta(selectedModel, false, modelAvailable, List.of(), conversation.getId(), savedMessage.getId(), userMessage.getId(), runContext.run().getId()));
             emit(consumer, ChatStreamEvent.status("answering", "回答中"));
-            emitChunkedDelta(consumer, answer);
+            String answerBlockId = beginMarkdownBlock(consumer);
+            emitChunkedAnswerDelta(consumer, answerBlockId, answer);
+            endMarkdownBlock(consumer, answerBlockId);
             emit(consumer, ChatStreamEvent.done());
             return;
         }
@@ -371,6 +382,7 @@ public class ChatService {
             return;
         }
         emit(consumer, ChatStreamEvent.status("answering", "回答中"));
+        String answerBlockId = beginMarkdownBlock(consumer);
 
         if (agentContext.weatherReport() != null
                 && !agentContext.weatherReport().available()
@@ -387,7 +399,8 @@ public class ChatService {
                     message
             );
             emit(consumer, ChatStreamEvent.meta(selectedModel, true, modelAvailable, agentContext.sources(), conversation.getId(), savedMessage.getId(), userMessage.getId(), agentContext.runContext().run().getId()));
-            emitChunkedDelta(consumer, agentContext.weatherReport().summary());
+            emitChunkedAnswerDelta(consumer, answerBlockId, agentContext.weatherReport().summary());
+            endMarkdownBlock(consumer, answerBlockId);
             emit(consumer, ChatStreamEvent.done());
             return;
         }
@@ -406,7 +419,8 @@ public class ChatService {
                     message
             );
             emit(consumer, ChatStreamEvent.meta(selectedModel, agentContext.useSearch(), false, agentContext.sources(), conversation.getId(), savedMessage.getId(), userMessage.getId(), agentContext.runContext().run().getId()));
-            emitChunkedDelta(consumer, answer);
+            emitChunkedAnswerDelta(consumer, answerBlockId, answer);
+            endMarkdownBlock(consumer, answerBlockId);
             emit(consumer, ChatStreamEvent.done());
             return;
         }
@@ -456,7 +470,7 @@ public class ChatService {
                         streamedAnswer.append(content);
                         persistPartialIfNeeded(agentContext.runContext(), streamedAnswer, agentContext.useSearch(), modelAvailable, agentContext.sources(), lastSavedLength, lastSavedAt);
                         try {
-                            consumer.accept(ChatStreamEvent.delta(content));
+                            emitAnswerDelta(consumer, answerBlockId, content);
                         } catch (IOException ex) {
                             throw new UncheckedIOException(ex);
                         }
@@ -483,7 +497,7 @@ public class ChatService {
                             message
                     );
                     emit(consumer, ChatStreamEvent.meta(selectedModel, agentContext.useSearch(), true, agentContext.sources(), conversation.getId(), savedMessage.getId(), userMessage.getId(), agentContext.runContext().run().getId()));
-                    emitChunkedDelta(consumer, fallbackAnswer);
+                    emitChunkedAnswerDelta(consumer, answerBlockId, fallbackAnswer);
                 } else {
                     String errorMessage = "没有收到模型返回内容。";
                     agentRunService.failRun(agentContext.runContext(), errorMessage, "");
@@ -521,6 +535,7 @@ public class ChatService {
                 emit(consumer, ChatStreamEvent.meta(selectedModel, agentContext.useSearch(), true, agentContext.sources(), conversation.getId(), savedMessage.getId(), userMessage.getId(), agentContext.runContext().run().getId()));
             }
 
+            endMarkdownBlock(consumer, answerBlockId);
             emit(consumer, ChatStreamEvent.done());
         } catch (AgentRunCancelledException ex) {
             saveCancelledPartial(conversation, streamedAnswer.toString(), selectedModel, agentContext.useSearch(), modelAvailable, agentContext.sources(), agentContext.runContext(), message);
@@ -552,13 +567,14 @@ public class ChatService {
                 );
                 emit(consumer, ChatStreamEvent.meta(selectedModel, agentContext.useSearch(), false, agentContext.sources(), conversation.getId(), savedMessage.getId(), userMessage.getId(), agentContext.runContext().run().getId()));
                 if (!StringUtils.hasText(partial)) {
-                    emitChunkedDelta(consumer, answer);
+                    emitChunkedAnswerDelta(consumer, answerBlockId, answer);
                 }
             } else {
                 addAgentStep(agentContext.runContext(), "error", "模型调用失败", ex.getMessage(), "failed", consumer);
                 agentRunService.failRun(agentContext.runContext(), "模型调用失败：" + ex.getMessage(), partial);
                 emit(consumer, ChatStreamEvent.error("模型调用失败：" + ex.getMessage()));
             }
+            endMarkdownBlock(consumer, answerBlockId);
             emit(consumer, ChatStreamEvent.done());
         }
     }
@@ -572,6 +588,12 @@ public class ChatService {
         if (agentRunService.isCancelled(runId)) {
             return new ChatResponse(
                     context.run().getFinalAnswer(),
+                    messageBlockFactory.assistantBlocks(
+                            context.run().getFinalAnswer(),
+                            context,
+                            request == null || request.sources() == null ? List.of() : request.sources(),
+                            "completed"
+                    ),
                     request != null && Boolean.TRUE.equals(request.realtimeSearchUsed()),
                     request == null || request.modelAvailable() == null || request.modelAvailable(),
                     request == null || !StringUtils.hasText(request.model()) ? context.run().getModel() : request.model(),
@@ -599,12 +621,16 @@ public class ChatService {
                     realtimeSearchUsed,
                     modelAvailable,
                     sources,
-                    "cancelled"
+                    "cancelled",
+                    messageBlockFactory.assistantBlocks(partialAnswer, context, sources, "cancelled")
             );
             agentRunService.attachAssistantMessage(context, savedMessage);
         }
         return new ChatResponse(
                 partialAnswer,
+                savedMessage == null
+                        ? messageBlockFactory.assistantBlocks(partialAnswer, context, sources, "cancelled")
+                        : conversationService.readMessageBlocks(savedMessage, context, sources),
                 realtimeSearchUsed,
                 modelAvailable,
                 model,
@@ -640,7 +666,9 @@ public class ChatService {
                     context.run().getUserMessageId(),
                     context.run().getId()
             ));
-            emitChunkedDelta(consumer, context.run().getFinalAnswer());
+            String answerBlockId = beginMarkdownBlock(consumer);
+            emitChunkedAnswerDelta(consumer, answerBlockId, context.run().getFinalAnswer());
+            endMarkdownBlock(consumer, answerBlockId);
             emit(consumer, ChatStreamEvent.done());
             return;
         }
@@ -691,6 +719,7 @@ public class ChatService {
         List<ChatMessage> history = conversationService.recentHistory(conversation.getId(), 16);
         emit(consumer, ChatStreamEvent.meta(selectedModel, approved, modelAvailable, sources, conversation.getId(), null, context.run().getUserMessageId(), context.run().getId()));
         emit(consumer, ChatStreamEvent.status("answering", "回答中"));
+        String answerBlockId = beginMarkdownBlock(consumer);
         agentRunService.updateProgress(context, "", approved, modelAvailable, sources);
 
         if (!modelAvailable) {
@@ -699,7 +728,8 @@ public class ChatService {
                     : "你已选择不联网检索。当前后端还没有可用模型，因此无法在不联网的情况下生成完整回答。";
             MessageEntity savedMessage = saveAssistantMessageAndFinalize(conversation, answer, selectedModel, approved, false, sources, context, message);
             emit(consumer, ChatStreamEvent.meta(selectedModel, approved, false, sources, conversation.getId(), savedMessage.getId(), context.run().getUserMessageId(), context.run().getId()));
-            emitChunkedDelta(consumer, answer);
+            emitChunkedAnswerDelta(consumer, answerBlockId, answer);
+            endMarkdownBlock(consumer, answerBlockId);
             emit(consumer, ChatStreamEvent.done());
             return;
         }
@@ -731,7 +761,7 @@ public class ChatService {
                         streamedAnswer.append(content);
                         persistPartialIfNeeded(context, streamedAnswer, approved, modelAvailable, sources, lastSavedLength, lastSavedAt);
                         try {
-                            consumer.accept(ChatStreamEvent.delta(content));
+                            emitAnswerDelta(consumer, answerBlockId, content);
                         } catch (IOException ex) {
                             throw new UncheckedIOException(ex);
                         }
@@ -751,6 +781,7 @@ public class ChatService {
             agentRunService.updateProgress(context, answer, approved, true, sources);
             MessageEntity savedMessage = saveAssistantMessageAndFinalize(conversation, answer, selectedModel, approved, true, sources, context, message);
             emit(consumer, ChatStreamEvent.meta(selectedModel, approved, true, sources, conversation.getId(), savedMessage.getId(), context.run().getUserMessageId(), context.run().getId()));
+            endMarkdownBlock(consumer, answerBlockId);
             emit(consumer, ChatStreamEvent.done());
         } catch (AgentRunCancelledException ex) {
             saveCancelledPartial(conversation, streamedAnswer.toString(), selectedModel, approved, modelAvailable, sources, context, message);
@@ -773,13 +804,14 @@ public class ChatService {
                 MessageEntity savedMessage = saveAssistantMessageAndFinalize(conversation, answer, selectedModel, approved, false, sources, context, message);
                 emit(consumer, ChatStreamEvent.meta(selectedModel, approved, false, sources, conversation.getId(), savedMessage.getId(), context.run().getUserMessageId(), context.run().getId()));
                 if (!StringUtils.hasText(partial)) {
-                    emitChunkedDelta(consumer, answer);
+                    emitChunkedAnswerDelta(consumer, answerBlockId, answer);
                 }
             } else {
                 addAgentStep(context, "error", "模型调用失败", ex.getMessage(), "failed", consumer);
                 agentRunService.failRun(context, "模型调用失败：" + ex.getMessage(), partial);
                 emit(consumer, ChatStreamEvent.error("模型调用失败：" + ex.getMessage()));
             }
+            endMarkdownBlock(consumer, answerBlockId);
             emit(consumer, ChatStreamEvent.done());
         }
     }
@@ -1555,7 +1587,8 @@ public class ChatService {
                 realtimeSearchUsed,
                 modelAvailable,
                 sources,
-                "cancelled"
+                "cancelled",
+                messageBlockFactory.assistantBlocks(content, runContext, sources, "cancelled")
         );
         agentRunService.attachAssistantMessage(runContext, savedMessage);
     }
@@ -1602,6 +1635,39 @@ public class ChatService {
         int chunkSize = 12;
         for (int index = 0; index < content.length(); index += chunkSize) {
             emit(consumer, ChatStreamEvent.delta(content.substring(index, Math.min(content.length(), index + chunkSize))));
+        }
+    }
+
+    private String beginMarkdownBlock(ChatStreamConsumer consumer) throws IOException {
+        String blockId = "markdown-" + UUID.randomUUID();
+        emit(consumer, ChatStreamEvent.blockStart(MessageBlock.markdown(blockId, "", true)));
+        return blockId;
+    }
+
+    private void emitAnswerDelta(ChatStreamConsumer consumer, String blockId, String content) throws IOException {
+        if (consumer == null || !StringUtils.hasText(content)) {
+            return;
+        }
+        if (StringUtils.hasText(blockId)) {
+            emit(consumer, ChatStreamEvent.blockDelta(blockId, content));
+        }
+        emit(consumer, ChatStreamEvent.delta(content));
+    }
+
+    private void emitChunkedAnswerDelta(ChatStreamConsumer consumer, String blockId, String content) throws IOException {
+        if (consumer == null || !StringUtils.hasText(content)) {
+            return;
+        }
+
+        int chunkSize = 12;
+        for (int index = 0; index < content.length(); index += chunkSize) {
+            emitAnswerDelta(consumer, blockId, content.substring(index, Math.min(content.length(), index + chunkSize)));
+        }
+    }
+
+    private void endMarkdownBlock(ChatStreamConsumer consumer, String blockId) throws IOException {
+        if (consumer != null && StringUtils.hasText(blockId)) {
+            emit(consumer, ChatStreamEvent.blockEnd(blockId));
         }
     }
 
@@ -1663,6 +1729,7 @@ public class ChatService {
         String savedAnswer = savedMessage.getContent();
         return new ChatResponse(
                 savedAnswer,
+                conversationService.readMessageBlocks(savedMessage, runContext, sources),
                 realtimeSearchUsed,
                 modelAvailable,
                 model,
@@ -1689,7 +1756,9 @@ public class ChatService {
                 model,
                 realtimeSearchUsed,
                 modelAvailable,
-                sources
+                sources,
+                "completed",
+                messageBlockFactory.assistantBlocks(finalAnswer, runContext, sources, "completed")
         );
         refreshConversationSummaryIfNeeded(conversation, model);
         memoryService.rememberConversationTurn(

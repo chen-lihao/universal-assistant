@@ -37,14 +37,16 @@ import {
   type ChatStreamPhase,
   type ConversationMessage,
   type ConversationSummary,
+  type MessageBlock,
   type SearchResult,
 } from '../services/assistantApi'
-import MarkdownMessage from './MarkdownMessage.vue'
+import MessageRenderer from './MessageRenderer.vue'
 
 type UiMessage = ChatMessage & {
   id: number | string
   messageId?: string
   sources?: SearchResult[]
+  contentBlocks?: MessageBlock[]
   realtimeSearchUsed?: boolean
   modelAvailable?: boolean
   model?: string
@@ -59,6 +61,7 @@ type UiMessage = ChatMessage & {
     input: string
     reason: string
   }
+  activeMarkdownBlockId?: string
   phase?: ChatStreamPhase
   isStreaming?: boolean
 }
@@ -230,6 +233,7 @@ function toUiMessage(message: ConversationMessage): UiMessage {
     messageId: message.id,
     role: message.role,
     content: restoredAssistantContent(message),
+    contentBlocks: message.contentBlocks || [],
     model: message.model,
     realtimeSearchUsed: message.realtimeSearchUsed,
     modelAvailable: restoredModelAvailable(message),
@@ -530,7 +534,7 @@ function startTypewriter() {
     }
 
     const chunkSize = typewriterQueue.length > 80 ? 3 : typewriterQueue.length > 24 ? 2 : 1
-    typewriterMessage.content += typewriterQueue.slice(0, chunkSize)
+    appendAssistantText(typewriterMessage, typewriterQueue.slice(0, chunkSize))
     typewriterQueue = typewriterQueue.slice(chunkSize)
     scrollMessagesToBottom()
   }, 28)
@@ -561,7 +565,7 @@ function flushTypewriter(message: UiMessage) {
     return
   }
 
-  message.content += typewriterQueue
+  appendAssistantText(message, typewriterQueue)
   typewriterQueue = ''
   window.clearInterval(typewriterTimer)
   typewriterTimer = undefined
@@ -569,6 +573,66 @@ function flushTypewriter(message: UiMessage) {
   if (pendingDoneMessage === message) {
     pendingDoneMessage = undefined
   }
+}
+
+function appendAssistantText(message: UiMessage, text: string) {
+  if (!text) {
+    return
+  }
+
+  message.content += text
+  const markdownBlock = currentMarkdownBlock(message)
+  if (markdownBlock) {
+    markdownBlock.content += text
+  }
+}
+
+function currentMarkdownBlock(message: UiMessage) {
+  const blockId = message.activeMarkdownBlockId
+  const block = (message.contentBlocks || []).find((item) => item.type === 'markdown' && (!blockId || item.id === blockId))
+  return block?.type === 'markdown' ? block : undefined
+}
+
+function upsertContentBlock(message: UiMessage, block: MessageBlock) {
+  const existing = message.contentBlocks || []
+  const index = existing.findIndex((item) => item.id === block.id)
+  if (index >= 0) {
+    const next = [...existing]
+    next[index] = block
+    message.contentBlocks = next
+  } else {
+    message.contentBlocks = [...existing, block]
+  }
+}
+
+function syncExecutionBlock(message: UiMessage) {
+  if (!message.agentSteps?.length) {
+    return
+  }
+
+  const block: MessageBlock = {
+    id: 'runtime-execution',
+    type: 'execution',
+    runId: message.agentRunId,
+    steps: message.agentSteps,
+    collapsed: false,
+  }
+  const rest = (message.contentBlocks || []).filter((item) => item.type !== 'execution')
+  message.contentBlocks = [block, ...rest]
+}
+
+function syncSourcesBlock(message: UiMessage) {
+  if (!message.sources?.length) {
+    return
+  }
+
+  const block: MessageBlock = {
+    id: 'runtime-sources',
+    type: 'sources',
+    items: message.sources,
+  }
+  const rest = (message.contentBlocks || []).filter((item) => item.type !== 'sources')
+  message.contentBlocks = [...rest, block]
 }
 
 function clearTypewriterFor(message: UiMessage) {
@@ -589,64 +653,6 @@ function clearTypewriterFor(message: UiMessage) {
 
 function modelLabel(model?: string) {
   return modelOptions.find((option) => option.value === model)?.label || model || ''
-}
-
-function sourceLabel(source: SearchResult) {
-  if (source.provider) {
-    return source.provider
-  }
-
-  try {
-    return new URL(source.url).hostname
-  } catch {
-    return 'source'
-  }
-}
-
-function stepStatusLabel(status: string) {
-  if (status === 'completed') {
-    return '完成'
-  }
-  if (status === 'failed') {
-    return '失败'
-  }
-  if (status === 'degraded') {
-    return '降级完成'
-  }
-  if (status === 'running') {
-    return '进行中'
-  }
-  if (status === 'waiting') {
-    return '等待确认'
-  }
-  if (status === 'cancelled') {
-    return '已停止'
-  }
-  if (status === 'invalidated') {
-    return '已失效'
-  }
-  if (status === 'unavailable') {
-    return '不可用'
-  }
-  return status || '记录'
-}
-
-function stepTypeLabel(type: string) {
-  const labels: Record<string, string> = {
-    thought: '思考',
-    plan: '计划',
-    action: '动作',
-    observation: '观察',
-    memory: '记忆',
-    reflection: '反思',
-    tool_confirmation: '确认',
-    user_decision: '确认',
-    final: '结果',
-    warning: '提醒',
-    error: '错误',
-    limit: '限制',
-  }
-  return labels[type] || type
 }
 
 function isSupportedModel(model: string) {
@@ -763,6 +769,7 @@ function applyStreamEvent(event: ChatStreamEvent, message: UiMessage, userMessag
       message.agentRunId = event.agentRunId
     }
     message.sources = mergeSources(message.sources, event.sources)
+    syncSourcesBlock(message)
     message.realtimeSearchUsed = message.realtimeSearchUsed || Boolean(event.realtimeSearchUsed)
     if (event.modelAvailable !== undefined) {
       message.modelAvailable = event.modelAvailable
@@ -782,6 +789,7 @@ function applyStreamEvent(event: ChatStreamEvent, message: UiMessage, userMessag
       existing.push(event.agentStep)
     }
     message.agentSteps = [...existing].sort((a, b) => a.index - b.index)
+    syncExecutionBlock(message)
     scrollMessagesToBottom()
     return
   }
@@ -803,6 +811,8 @@ function applyStreamEvent(event: ChatStreamEvent, message: UiMessage, userMessag
   if (event.type === 'answer_reset') {
     clearTypewriterFor(message)
     message.content = ''
+    message.contentBlocks = []
+    message.activeMarkdownBlockId = undefined
     message.phase = 'answering'
     message.isStreaming = true
     setCurrentPhase('answering')
@@ -811,7 +821,46 @@ function applyStreamEvent(event: ChatStreamEvent, message: UiMessage, userMessag
     return
   }
 
+  if (event.type === 'block_start' && event.block) {
+    if (event.block.type === 'markdown') {
+      clearTypewriterFor(message)
+      message.content = ''
+      message.activeMarkdownBlockId = event.block.id
+    }
+    upsertContentBlock(message, event.block)
+    scrollMessagesToBottom()
+    return
+  }
+
+  if (event.type === 'block_delta') {
+    if (event.blockId) {
+      message.activeMarkdownBlockId = event.blockId
+    }
+    if (message.phase !== 'answering') {
+      applyStreamPhase(message, 'answering')
+    }
+    enqueueTypewriterText(message, event.content || '')
+    markPetSpeaking(0)
+    scrollMessagesToBottom()
+    return
+  }
+
+  if (event.type === 'block_end') {
+    const block = event.blockId ? (message.contentBlocks || []).find((item) => item.id === event.blockId) : undefined
+    if (block?.type === 'markdown') {
+      block.streaming = false
+    }
+    if (message.activeMarkdownBlockId === event.blockId) {
+      message.activeMarkdownBlockId = undefined
+    }
+    scrollMessagesToBottom()
+    return
+  }
+
   if (event.type === 'delta') {
+    if (message.activeMarkdownBlockId) {
+      return
+    }
     if (message.phase !== 'answering') {
       applyStreamPhase(message, 'answering')
     }
@@ -856,6 +905,7 @@ function applyChatResponse(response: ChatResponse, message: UiMessage, fallbackM
   message.agentSteps = response.agentSteps || message.agentSteps || []
   message.status = response.answer ? message.status : 'error'
   message.sources = mergeSources(message.sources, response.sources)
+  message.contentBlocks = (response.contentBlocks || []).filter((block) => block.type !== 'markdown')
   message.realtimeSearchUsed = message.realtimeSearchUsed || response.realtimeSearchUsed
   message.modelAvailable = response.modelAvailable
   message.model = response.model || fallbackModel
@@ -1148,6 +1198,8 @@ async function handleToolDecision(message: UiMessage, decision: 'approved' | 'de
   message.phase = 'thinking'
   message.isStreaming = true
   message.content = ''
+  message.contentBlocks = []
+  message.activeMarkdownBlockId = undefined
   message.sources = []
   isSending.value = true
   activeAssistantMessage = message
@@ -1471,24 +1523,14 @@ async function convertSelectedFile() {
           <Bot :size="15" />
         </span>
         <div class="message-stack">
-          <details v-if="message.role === 'assistant' && message.agentSteps?.length" class="agent-steps" open>
-            <summary>
-              <Sparkles :size="13" />
-              <span>执行过程</span>
-              <small>{{ message.agentSteps.length }} 步</small>
-            </summary>
-            <ol>
-              <li v-for="step in message.agentSteps" :key="step.id" :class="{ failed: step.status === 'failed' }">
-                <div>
-                  <strong>{{ step.title }}</strong>
-                  <small>{{ stepTypeLabel(step.type) }} · {{ stepStatusLabel(step.status) }}</small>
-                </div>
-                <p v-if="step.content">{{ step.content }}</p>
-              </li>
-            </ol>
-          </details>
           <div class="message">
-            <MarkdownMessage v-if="message.role === 'assistant' && message.content" :content="message.content" />
+            <MessageRenderer
+              v-if="message.role === 'assistant' && (message.content || message.contentBlocks?.length || message.agentSteps?.length || message.sources?.length)"
+              :content="message.content"
+              :blocks="message.contentBlocks"
+              :agent-steps="message.agentSteps"
+              :sources="message.sources"
+            />
             <p v-else-if="message.role === 'user'">{{ message.content }}</p>
             <div v-if="message.role === 'assistant' && !message.content && message.status !== 'cancelled'" class="message-progress">
               <span class="typing-dots" aria-hidden="true">
@@ -1511,12 +1553,6 @@ async function convertSelectedFile() {
                   不联网回答
                 </button>
               </div>
-            </div>
-            <div v-if="message.sources?.length" class="sources">
-              <a v-for="source in message.sources" :key="source.url" :href="source.url" target="_blank" rel="noreferrer">
-                <span>{{ source.title }}</span>
-                <small>{{ sourceLabel(source) }}</small>
-              </a>
             </div>
             <div
               v-if="message.phase || message.editedAt || message.status === 'cancelled' || message.realtimeSearchUsed || (message.model && message.role === 'assistant') || message.modelAvailable === false"

@@ -42,6 +42,9 @@ public class MessageEntity {
     @Column(name = "sources_json", columnDefinition = "text")
     private String sourcesJson;
 
+    @Column(name = "content_blocks_json", nullable = false, columnDefinition = "text")
+    private String contentBlocksJson = "[]";
+
     @Column(nullable = false, length = 24)
     private String status = "completed";
 
@@ -71,6 +74,9 @@ public class MessageEntity {
         if (revision <= 0) {
             revision = 1;
         }
+        if (contentBlocksJson == null) {
+            contentBlocksJson = "[]";
+        }
     }
 
     @PreUpdate
@@ -80,6 +86,9 @@ public class MessageEntity {
         }
         if (revision <= 0) {
             revision = 1;
+        }
+        if (contentBlocksJson == null) {
+            contentBlocksJson = "[]";
         }
     }
 
@@ -145,6 +154,14 @@ public class MessageEntity {
 
     public void setSourcesJson(String sourcesJson) {
         this.sourcesJson = sourcesJson;
+    }
+
+    public String getContentBlocksJson() {
+        return contentBlocksJson;
+    }
+
+    public void setContentBlocksJson(String contentBlocksJson) {
+        this.contentBlocksJson = contentBlocksJson;
     }
 
     public String getStatus() {

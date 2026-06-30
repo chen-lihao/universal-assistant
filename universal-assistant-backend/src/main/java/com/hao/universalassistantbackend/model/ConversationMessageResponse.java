@@ -8,6 +8,7 @@ public record ConversationMessageResponse(
         UUID id,
         String role,
         String content,
+        List<MessageBlock> contentBlocks,
         String model,
         Boolean realtimeSearchUsed,
         Boolean modelAvailable,
