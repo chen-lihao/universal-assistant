@@ -80,6 +80,7 @@ public class ChatService {
     private final MemoryService memoryService;
     private final WeatherTools weatherTools;
     private final WeatherQueryPlanner weatherQueryPlanner;
+    private final PendingAgentActionService pendingAgentActionService;
     private final String dashScopeApiKey;
     private final int maxTokens;
 
@@ -90,6 +91,7 @@ public class ChatService {
                        MemoryService memoryService,
                        WeatherTools weatherTools,
                        WeatherQueryPlanner weatherQueryPlanner,
+                       PendingAgentActionService pendingAgentActionService,
                        @Value("${spring.ai.dashscope.api-key:}") String dashScopeApiKey,
                        @Value("${assistant.chat.max-tokens:2400}") int maxTokens) {
         this.chatClientProvider = chatClientProvider;
@@ -99,6 +101,7 @@ public class ChatService {
         this.memoryService = memoryService;
         this.weatherTools = weatherTools;
         this.weatherQueryPlanner = weatherQueryPlanner;
+        this.pendingAgentActionService = pendingAgentActionService;
         this.dashScopeApiKey = dashScopeApiKey;
         this.maxTokens = maxTokens;
     }
@@ -153,6 +156,25 @@ public class ChatService {
             userMessage = conversationService.saveUserMessage(conversation, message);
         }
         String conversationSummary = conversationService.summaryText(conversation.getId()).orElse("");
+        PendingAgentActionService.PendingActionResolution pendingResolution = pendingAgentActionService.resolve(conversation, userMessage, message);
+        if (pendingResolution.rejected()) {
+            AgentRunContext runContext = agentRunService.startRun(conversation, userMessage, AgentMode.DIRECT, message, selectedModel);
+            addAgentStep(runContext, "thought", "处理待确认任务", "用户拒绝继续上一轮 pending action，关闭等待状态。", "completed", null);
+            return persistChatResponse(
+                    conversation,
+                    pendingResolution.directAnswer(),
+                    false,
+                    isModelConfigured(),
+                    selectedModel,
+                    List.of(),
+                    runContext,
+                    message
+            );
+        }
+        if (pendingResolution.confirmed()) {
+            message = pendingResolution.effectiveMessage();
+            requestedSearch = false;
+        }
         if (shouldAnswerModelIdentity(message)) {
             AgentRunContext runContext = agentRunService.startRun(conversation, userMessage, AgentMode.DIRECT, message, selectedModel);
             addAgentStep(runContext, "thought", "识别模型身份问题", "用户询问当前底层模型，直接使用后端运行时模型元数据回答。", "completed", null);
@@ -288,6 +310,23 @@ public class ChatService {
             userMessage = conversationService.saveUserMessage(conversation, message);
         }
         String conversationSummary = conversationService.summaryText(conversation.getId()).orElse("");
+        PendingAgentActionService.PendingActionResolution pendingResolution = pendingAgentActionService.resolve(conversation, userMessage, message);
+        if (pendingResolution.rejected()) {
+            boolean modelAvailable = isModelConfigured();
+            AgentRunContext runContext = agentRunService.startRun(conversation, userMessage, AgentMode.DIRECT, message, selectedModel);
+            emit(consumer, ChatStreamEvent.meta(selectedModel, false, modelAvailable, List.of(), conversation.getId(), null, userMessage.getId(), runContext.run().getId()));
+            addAgentStep(runContext, "thought", "处理待确认任务", "用户拒绝继续上一轮 pending action，关闭等待状态。", "completed", consumer);
+            MessageEntity savedMessage = saveAssistantMessageAndFinalize(conversation, pendingResolution.directAnswer(), selectedModel, false, modelAvailable, List.of(), runContext, message);
+            emit(consumer, ChatStreamEvent.meta(selectedModel, false, modelAvailable, List.of(), conversation.getId(), savedMessage.getId(), userMessage.getId(), runContext.run().getId()));
+            emit(consumer, ChatStreamEvent.status("answering", "回答中"));
+            emitChunkedDelta(consumer, pendingResolution.directAnswer());
+            emit(consumer, ChatStreamEvent.done());
+            return;
+        }
+        if (pendingResolution.confirmed()) {
+            message = pendingResolution.effectiveMessage();
+            requestedSearch = false;
+        }
         if (shouldAnswerModelIdentity(message)) {
             boolean modelAvailable = isModelConfigured();
             AgentRunContext runContext = agentRunService.startRun(conversation, userMessage, AgentMode.DIRECT, message, selectedModel);
@@ -758,7 +797,7 @@ public class ChatService {
         WeatherPlan weatherPlan = weatherQueryPlanner.plan(message, history, conversationSummary);
         boolean weatherIntent = shouldUseWeatherTool(message) || weatherPlan.weatherIntent();
         SearchDecision searchDecision = decideSearchNeed(message, history, chatClient, selectedModel);
-        boolean useSearch = Boolean.TRUE.equals(requestedSearch) || weatherIntent || searchDecision.needsSearch();
+        boolean useSearch = Boolean.TRUE.equals(requestedSearch) || (!weatherIntent && searchDecision.needsSearch());
         AgentMode mode = selectAgentMode(message, weatherIntent, useSearch);
         AgentRunContext runContext = agentRunService.startRun(conversation, userMessage, mode, message, selectedModel);
         agentRunService.updateProgress(runContext, "", useSearch, modelAvailable, List.of());
@@ -915,14 +954,11 @@ public class ChatService {
         }
 
         String lower = decision.toLowerCase(Locale.ROOT);
-        boolean needsSearch;
-        if (lower.contains("search: yes") || lower.contains("search：yes") || lower.contains("需要") || lower.contains("yes")) {
-            needsSearch = true;
-        } else if (lower.contains("search: no") || lower.contains("search：no") || lower.contains("不需要") || lower.contains("no")) {
-            needsSearch = false;
-        } else {
+        Matcher searchMatcher = Pattern.compile("search\\s*[:：]\\s*(yes|no)", Pattern.CASE_INSENSITIVE).matcher(lower);
+        if (!searchMatcher.find()) {
             return null;
         }
+        boolean needsSearch = "yes".equalsIgnoreCase(searchMatcher.group(1));
 
         String reason = extractDecisionField(decision, "REASON");
         String query = extractDecisionField(decision, "QUERY");
@@ -1272,15 +1308,59 @@ public class ChatService {
                 return currentAnswer;
             }
 
-            String supplement = "\n\n补充修正：\n" + improvement.trim();
-            currentAnswer += supplement;
+            String revisedAnswer;
+            try {
+                revisedAnswer = reviseAnswerWithReflection(message, currentAnswer, improvement, agentContext, chatClient, selectedModel);
+            } catch (RuntimeException ex) {
+                addAgentStep(agentContext.runContext(), "reflection", "Reflection 修订失败", ex.getMessage(), "failed", consumer);
+                return currentAnswer;
+            }
+
+            if (!StringUtils.hasText(revisedAnswer)) {
+                return currentAnswer;
+            }
+
+            currentAnswer = revisedAnswer.trim();
+            addAgentStep(
+                    agentContext.runContext(),
+                    "final",
+                    "Reflection 修订回答",
+                    "已根据 Reflection 建议重写最终回答，Reflection 内容仅保留在执行过程。",
+                    "completed",
+                    consumer
+            );
             if (streaming && consumer != null) {
                 emitUnchecked(consumer, ChatStreamEvent.status("answering", "回答中"));
-                emitChunkedDeltaUnchecked(consumer, supplement);
+                emitUnchecked(consumer, ChatStreamEvent.answerReset("已根据 Reflection 修订最终回答"));
+                emitChunkedDeltaUnchecked(consumer, currentAnswer);
             }
         }
 
         return currentAnswer;
+    }
+
+    private String reviseAnswerWithReflection(String message,
+                                              String currentAnswer,
+                                              String improvement,
+                                              PreparedAgentContext agentContext,
+                                              ChatClient chatClient,
+                                              String selectedModel) {
+        String revised = chatClient.prompt()
+                .system("""
+                        You revise assistant answers after reflection.
+                        Return only the final Chinese answer shown to the user.
+                        Do not include reflection notes, review checklists, self-evaluation, labels like "补充修正", or process descriptions.
+                        Keep useful content from the draft answer, integrate the requested correction, and make the final answer coherent.
+                        """)
+                .options(DashScopeChatOptions.builder()
+                        .model(selectedModel)
+                        .temperature(0.35)
+                        .maxToken(maxTokens)
+                        .build())
+                .user(buildRevisionPrompt(message, currentAnswer, improvement, agentContext))
+                .call()
+                .content();
+        return revised == null ? "" : revised.trim();
     }
 
     private String buildReflectionPrompt(String message, String answer, PreparedAgentContext agentContext) {
@@ -1314,6 +1394,45 @@ public class ChatService {
                     .append(summarizeMemories(agentContext.memories()))
                     .append('\n');
         }
+        return prompt.toString();
+    }
+
+    private String buildRevisionPrompt(String message, String answer, String improvement, PreparedAgentContext agentContext) {
+        StringBuilder prompt = new StringBuilder();
+        prompt.append("User question:\n")
+                .append(message)
+                .append("\n\nDraft answer:\n")
+                .append(answer)
+                .append("\n\nReflection improvement to integrate:\n")
+                .append(improvement)
+                .append("\n\n");
+        if (StringUtils.hasText(agentContext.plan())) {
+            prompt.append("Plan:\n").append(agentContext.plan()).append("\n\n");
+        }
+        if (agentContext.weatherReport() != null && StringUtils.hasText(agentContext.weatherReport().context())) {
+            prompt.append("Weather tool context:\n")
+                    .append(agentContext.weatherReport().context())
+                    .append("\n\n");
+        }
+        if (!agentContext.sources().isEmpty()) {
+            prompt.append("Search sources:\n");
+            for (SearchResult source : agentContext.sources()) {
+                prompt.append("- ")
+                        .append(source.title())
+                        .append(" ")
+                        .append(source.url())
+                        .append('\n');
+            }
+            prompt.append('\n');
+        }
+        if (!agentContext.memories().isEmpty()) {
+            prompt.append("Relevant memories:\n")
+                    .append(summarizeMemories(agentContext.memories()))
+                    .append('\n');
+        }
+        prompt.append("""
+                Rewrite the final answer now. The user should see only the answer, not the reflection process.
+                """);
         return prompt.toString();
     }
 
@@ -1581,6 +1700,7 @@ public class ChatService {
                 model,
                 sources == null ? 0 : sources.size()
         );
+        pendingAgentActionService.registerFromAssistantTurn(conversation, savedMessage, userMessage, finalAnswer);
         if (runContext != null) {
             agentRunService.completeRun(runContext, savedMessage, finalAnswer);
         }

@@ -191,7 +191,7 @@ async function toggleChat() {
     isClicking.value = false
   }, 360)
 
-  await window.assistant?.toggleChat()
+  await window.assistant?.showChat()
 }
 
 function setPetPointerActive(active: boolean) {

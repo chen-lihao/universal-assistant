@@ -58,6 +58,10 @@ public record ChatStreamEvent(
         return new ChatStreamEvent("delta", null, null, content, null, null, null, null, null, null, null, null, null, null, null, null);
     }
 
+    public static ChatStreamEvent answerReset(String message) {
+        return new ChatStreamEvent("answer_reset", "answering", message, null, null, null, null, null, null, null, null, null, null, null, null, null);
+    }
+
     public static ChatStreamEvent agentStep(AgentStepResponse agentStep) {
         return new ChatStreamEvent("agent_step", null, null, null, null, null, null, null, null, null, null, agentStep.runId(), agentStep, null, null, null);
     }

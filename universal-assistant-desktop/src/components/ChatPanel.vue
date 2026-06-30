@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import {
   Bot,
   ChevronDown,
@@ -53,6 +53,7 @@ type UiMessage = ChatMessage & {
   status?: string
   revision?: number
   editedAt?: string
+  localEditable?: boolean
   pendingTool?: {
     name: string
     input: string
@@ -109,8 +110,10 @@ const fileDirty = ref(false)
 const targetFormat = ref('md')
 const errorText = ref('')
 const messageListRef = ref<HTMLElement | null>(null)
+const draftTextareaRef = ref<HTMLTextAreaElement | null>(null)
+const shouldAutoFollowMessages = ref(true)
+const showScrollToBottom = ref(false)
 const editingMessageId = ref<string | number>()
-const editingDraft = ref('')
 const renamingConversationId = ref<string>()
 const renamingTitle = ref('')
 let activeAbortController: AbortController | undefined
@@ -134,6 +137,9 @@ const selectedFileName = computed(() => {
 
   return selectedFilePath.value.split(/[\\/]/).pop() || selectedFilePath.value
 })
+const editingMessage = computed(() => messages.value.find((message) => message.id === editingMessageId.value && message.role === 'user'))
+const isEditingDraft = computed(() => Boolean(editingMessage.value))
+const draftPlaceholder = computed(() => (isEditingDraft.value ? '编辑问题，Enter 重新发送，Shift + Enter 换行' : '输入问题，Shift + Enter 换行'))
 let petIdleTimer: number | undefined
 let phaseResetTimer: number | undefined
 let typewriterTimer: number | undefined
@@ -142,12 +148,15 @@ let typewriterMessage: UiMessage | undefined
 let pendingDoneMessage: UiMessage | undefined
 let conversationRetryTimer: number | undefined
 let conversationRetryDelay = 2000
+const MESSAGE_BOTTOM_THRESHOLD = 110
+const DRAFT_MAX_HEIGHT = 160
 
 onMounted(async () => {
   await refreshConversations({ retryOnFailure: true })
   if (!currentConversationId.value && conversations.value.length > 0) {
     await openConversation(conversations.value[0])
   }
+  resizeDraftTextarea()
 })
 
 onUnmounted(() => {
@@ -156,6 +165,8 @@ onUnmounted(() => {
   window.clearTimeout(petIdleTimer)
   window.clearInterval(typewriterTimer)
 })
+
+watch(draft, () => resizeDraftTextarea())
 
 function nextId() {
   return Date.now() + Math.floor(Math.random() * 1000)
@@ -226,6 +237,7 @@ function toUiMessage(message: ConversationMessage): UiMessage {
     status: message.status,
     revision: message.revision,
     editedAt: message.editedAt,
+    localEditable: message.role === 'user',
     agentRunId: message.agentRunId,
     agentSteps: message.agentSteps || [],
     pendingTool: message.pendingToolName
@@ -243,7 +255,7 @@ function toUiMessage(message: ConversationMessage): UiMessage {
 function appendMessage(message: Omit<UiMessage, 'id'>) {
   const nextMessage = { ...message, id: nextId() }
   messages.value.push(nextMessage)
-  scrollMessagesToBottom()
+  forceScrollMessagesToBottom()
   return nextMessage
 }
 
@@ -297,11 +309,13 @@ async function refreshConversations(options: { retryOnFailure?: boolean } = {}) 
 function startNewConversation() {
   currentConversationId.value = undefined
   messages.value = [welcomeMessage()]
+  editingMessageId.value = undefined
   draft.value = ''
   errorText.value = ''
   conversationPanelOpen.value = false
   setCurrentPhase('idle')
-  scrollMessagesToBottom()
+  forceScrollMessagesToBottom()
+  resizeDraftTextarea()
 }
 
 function createNewConversation() {
@@ -319,9 +333,12 @@ async function openConversation(conversation: ConversationSummary) {
     currentConversationId.value = response.conversationId
     const loadedMessages = response.messages.map(toUiMessage)
     messages.value = loadedMessages.length ? loadedMessages : [welcomeMessage()]
+    editingMessageId.value = undefined
+    draft.value = ''
     conversationPanelOpen.value = false
     setCurrentPhase('idle')
-    scrollMessagesToBottom()
+    forceScrollMessagesToBottom()
+    resizeDraftTextarea()
   } catch (error) {
     errorText.value = error instanceof Error ? error.message : String(error)
   }
@@ -359,10 +376,81 @@ function formatConversationTime(value: string) {
 function scrollMessagesToBottom() {
   void nextTick(() => {
     const list = messageListRef.value
-    if (list) {
-      list.scrollTop = list.scrollHeight
+    if (!list || (!shouldAutoFollowMessages.value && showScrollToBottom.value)) {
+      return
     }
+
+    list.scrollTop = list.scrollHeight
+    updateMessageScrollState()
   })
+}
+
+function forceScrollMessagesToBottom() {
+  shouldAutoFollowMessages.value = true
+  showScrollToBottom.value = false
+  void nextTick(() => {
+    const list = messageListRef.value
+    if (!list) {
+      return
+    }
+
+    list.scrollTop = list.scrollHeight
+    updateMessageScrollState()
+  })
+}
+
+function isNearMessageBottom(list: HTMLElement) {
+  return list.scrollHeight - list.scrollTop - list.clientHeight <= MESSAGE_BOTTOM_THRESHOLD
+}
+
+function updateMessageScrollState() {
+  const list = messageListRef.value
+  if (!list) {
+    shouldAutoFollowMessages.value = true
+    showScrollToBottom.value = false
+    return
+  }
+
+  const nearBottom = isNearMessageBottom(list)
+  shouldAutoFollowMessages.value = nearBottom
+  showScrollToBottom.value = !nearBottom
+}
+
+function handleMessageListScroll() {
+  updateMessageScrollState()
+}
+
+function resizeDraftTextarea() {
+  void nextTick(() => {
+    const textarea = draftTextareaRef.value
+    if (!textarea) {
+      return
+    }
+
+    textarea.style.height = 'auto'
+    const nextHeight = Math.min(textarea.scrollHeight, DRAFT_MAX_HEIGHT)
+    textarea.style.height = `${nextHeight}px`
+    textarea.style.overflowY = textarea.scrollHeight > DRAFT_MAX_HEIGHT ? 'auto' : 'hidden'
+  })
+}
+
+function canEditUserMessage(message: UiMessage) {
+  return message.role === 'user' && Boolean(message.messageId || message.localEditable)
+}
+
+function markPreviousUserMessageEditable(assistantMessage: UiMessage) {
+  const assistantIndex = messages.value.findIndex((message) => message.id === assistantMessage.id)
+  if (assistantIndex <= 0) {
+    return
+  }
+
+  for (let index = assistantIndex - 1; index >= 0; index -= 1) {
+    const message = messages.value[index]
+    if (message.role === 'user') {
+      message.localEditable = true
+      return
+    }
+  }
 }
 
 function phaseLabel(phase?: UiPhase) {
@@ -417,6 +505,7 @@ function markMessageCancelled(message: UiMessage) {
   message.status = 'cancelled'
   message.phase = 'cancelled'
   message.isStreaming = false
+  markPreviousUserMessageEditable(message)
   setCurrentPhase('cancelled')
   schedulePetIdle(600)
   resetCurrentPhaseLater()
@@ -477,6 +566,22 @@ function flushTypewriter(message: UiMessage) {
   window.clearInterval(typewriterTimer)
   typewriterTimer = undefined
   typewriterMessage = undefined
+  if (pendingDoneMessage === message) {
+    pendingDoneMessage = undefined
+  }
+}
+
+function clearTypewriterFor(message: UiMessage) {
+  if (typewriterMessage !== message && pendingDoneMessage !== message) {
+    return
+  }
+
+  typewriterQueue = ''
+  window.clearInterval(typewriterTimer)
+  typewriterTimer = undefined
+  if (typewriterMessage === message) {
+    typewriterMessage = undefined
+  }
   if (pendingDoneMessage === message) {
     pendingDoneMessage = undefined
   }
@@ -652,6 +757,7 @@ function applyStreamEvent(event: ChatStreamEvent, message: UiMessage, userMessag
     if (event.userMessageId && userMessage) {
       userMessage.messageId = event.userMessageId
       userMessage.id = event.userMessageId
+      userMessage.localEditable = true
     }
     if (event.agentRunId) {
       message.agentRunId = event.agentRunId
@@ -690,6 +796,17 @@ function applyStreamEvent(event: ChatStreamEvent, message: UiMessage, userMessag
     message.phase = 'waiting_confirmation'
     message.isStreaming = false
     setCurrentPhase('waiting_confirmation')
+    scrollMessagesToBottom()
+    return
+  }
+
+  if (event.type === 'answer_reset') {
+    clearTypewriterFor(message)
+    message.content = ''
+    message.phase = 'answering'
+    message.isStreaming = true
+    setCurrentPhase('answering')
+    markPetSpeaking(0)
     scrollMessagesToBottom()
     return
   }
@@ -763,6 +880,11 @@ function applyChatResponse(response: ChatResponse, message: UiMessage, fallbackM
 }
 
 async function send() {
+  if (editingMessage.value) {
+    await submitEditedDraft()
+    return
+  }
+
   const text = draft.value.trim()
   if (!text || isSending.value) {
     return
@@ -770,12 +892,13 @@ async function send() {
 
   const prepared = prepareDraft(text)
   draft.value = ''
+  resizeDraftTextarea()
   if (!prepared || !prepared.message) {
     return
   }
 
   const history = recentHistory()
-  const userMessage = appendMessage({ role: 'user', content: prepared.message })
+  const userMessage = appendMessage({ role: 'user', content: prepared.message, localEditable: true })
   const assistantMessage = appendMessage({
     role: 'assistant',
     content: '',
@@ -948,22 +1071,29 @@ async function stopGeneration() {
 }
 
 function startEditMessage(message: UiMessage) {
-  if (isSending.value || message.role !== 'user' || !message.messageId) {
+  if (isSending.value || !canEditUserMessage(message)) {
     return
   }
 
   editingMessageId.value = message.id
-  editingDraft.value = message.content
+  draft.value = message.content
+  void nextTick(() => {
+    resizeDraftTextarea()
+    draftTextareaRef.value?.focus()
+    draftTextareaRef.value?.setSelectionRange(draft.value.length, draft.value.length)
+  })
 }
 
 function cancelEditMessage() {
   editingMessageId.value = undefined
-  editingDraft.value = ''
+  draft.value = ''
+  resizeDraftTextarea()
 }
 
-async function submitEditedMessage(message: UiMessage) {
-  const text = editingDraft.value.trim()
-  if (!text || isSending.value || !message.messageId) {
+async function submitEditedDraft() {
+  const message = editingMessage.value
+  const text = draft.value.trim()
+  if (!message || !text || isSending.value || !canEditUserMessage(message)) {
     return
   }
 
@@ -978,10 +1108,13 @@ async function submitEditedMessage(message: UiMessage) {
   }
 
   message.content = prepared.message
+  message.localEditable = true
   message.revision = (message.revision || 1) + 1
   message.editedAt = new Date().toISOString()
   messages.value = messages.value.slice(0, messageIndex + 1)
-  cancelEditMessage()
+  editingMessageId.value = undefined
+  draft.value = ''
+  resizeDraftTextarea()
 
   const assistantMessage = appendMessage({
     role: 'assistant',
@@ -1332,40 +1465,30 @@ async function convertSelectedFile() {
       <p v-if="errorText" class="error-text">{{ errorText }}</p>
     </section>
 
-    <section ref="messageListRef" class="message-list" aria-live="polite">
-      <article v-for="message in messages" :key="message.id" class="message-row" :class="message.role">
+    <section ref="messageListRef" class="message-list" aria-live="polite" @scroll="handleMessageListScroll">
+      <article v-for="message in messages" :key="message.id" class="message-row" :class="[message.role, { editing: editingMessageId === message.id }]">
         <span v-if="message.role === 'assistant'" class="message-avatar" aria-hidden="true">
           <Bot :size="15" />
         </span>
         <div class="message-stack">
+          <details v-if="message.role === 'assistant' && message.agentSteps?.length" class="agent-steps" open>
+            <summary>
+              <Sparkles :size="13" />
+              <span>执行过程</span>
+              <small>{{ message.agentSteps.length }} 步</small>
+            </summary>
+            <ol>
+              <li v-for="step in message.agentSteps" :key="step.id" :class="{ failed: step.status === 'failed' }">
+                <div>
+                  <strong>{{ step.title }}</strong>
+                  <small>{{ stepTypeLabel(step.type) }} · {{ stepStatusLabel(step.status) }}</small>
+                </div>
+                <p v-if="step.content">{{ step.content }}</p>
+              </li>
+            </ol>
+          </details>
           <div class="message">
-            <details v-if="message.role === 'assistant' && message.agentSteps?.length" class="agent-steps" :open="message.isStreaming">
-              <summary>
-                <Sparkles :size="13" />
-                <span>执行过程</span>
-                <small>{{ message.agentSteps.length }} 步</small>
-              </summary>
-              <ol>
-                <li v-for="step in message.agentSteps" :key="step.id" :class="{ failed: step.status === 'failed' }">
-                  <div>
-                    <strong>{{ step.title }}</strong>
-                    <small>{{ stepTypeLabel(step.type) }} · {{ stepStatusLabel(step.status) }}</small>
-                  </div>
-                  <p v-if="step.content">{{ step.content }}</p>
-                </li>
-              </ol>
-            </details>
             <MarkdownMessage v-if="message.role === 'assistant' && message.content" :content="message.content" />
-            <div v-else-if="message.role === 'user' && editingMessageId === message.id" class="edit-message">
-              <textarea v-model="editingDraft" rows="3" @keydown.enter.exact.prevent="submitEditedMessage(message)" />
-              <div>
-                <button class="tool-button compact" type="button" :disabled="!editingDraft.trim()" @click="submitEditedMessage(message)">
-                  <Check :size="13" />
-                  重新发送
-                </button>
-                <button class="tool-button compact" type="button" @click="cancelEditMessage">取消</button>
-              </div>
-            </div>
             <p v-else-if="message.role === 'user'">{{ message.content }}</p>
             <div v-if="message.role === 'assistant' && !message.content && message.status !== 'cancelled'" class="message-progress">
               <span class="typing-dots" aria-hidden="true">
@@ -1407,7 +1530,7 @@ async function convertSelectedFile() {
               <small v-if="message.modelAvailable === false">模型未连接或调用失败</small>
             </div>
           </div>
-          <div v-if="message.role === 'user' && editingMessageId !== message.id && message.messageId" class="message-actions">
+          <div v-if="message.role === 'user' && editingMessageId !== message.id && canEditUserMessage(message)" class="message-actions">
             <button class="ghost-icon small" type="button" title="编辑并重发" :disabled="isSending" @click="startEditMessage(message)">
               <Edit3 :size="13" />
             </button>
@@ -1415,6 +1538,11 @@ async function convertSelectedFile() {
         </div>
       </article>
     </section>
+
+    <button v-if="showScrollToBottom" class="scroll-bottom-button" type="button" @click="forceScrollMessagesToBottom">
+      <ChevronDown :size="15" />
+      回到底部
+    </button>
 
     <section v-if="showFilePanel" class="file-panel" :class="{ disabled: !isElectron }">
       <div class="file-panel-header">
@@ -1493,15 +1621,35 @@ async function convertSelectedFile() {
           <span>实时检索</span>
         </label>
       </div>
+      <div v-if="isEditingDraft" class="composer-edit-banner">
+        <span>
+          <Edit3 :size="13" />
+          正在编辑上一条问题，重发后会覆盖其后续回答
+        </span>
+        <button class="tool-button compact" type="button" :disabled="isSending" @click="cancelEditMessage">取消编辑</button>
+      </div>
       <div class="input-bar">
         <textarea
+          ref="draftTextareaRef"
           v-model="draft"
-          rows="2"
-          placeholder="输入问题，Shift + Enter 换行"
+          rows="1"
+          :placeholder="draftPlaceholder"
+          @input="resizeDraftTextarea"
           @keydown.enter.exact.prevent="send"
         />
-        <button class="send-button" type="button" :class="{ stop: isSending }" :disabled="!isSending && !draft.trim()" :title="isSending ? '停止' : '发送'" @click="isSending ? stopGeneration() : send()">
+        <button
+          class="send-button"
+          type="button"
+          :class="{ stop: isSending, editing: isEditingDraft }"
+          :disabled="!isSending && !draft.trim()"
+          :title="isSending ? '停止' : isEditingDraft ? '重新发送' : '发送'"
+          @click="isSending ? stopGeneration() : send()"
+        >
           <Square v-if="isSending" :size="16" />
+          <template v-else-if="isEditingDraft">
+            <Check :size="15" />
+            <span>重发</span>
+          </template>
           <Send v-else :size="18" />
         </button>
       </div>
@@ -1511,6 +1659,7 @@ async function convertSelectedFile() {
 
 <style scoped>
 .chat-window {
+  position: relative;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto auto;
   width: 100vw;
@@ -1812,6 +1961,26 @@ async function convertSelectedFile() {
   user-select: text;
 }
 
+.scroll-bottom-button {
+  position: absolute;
+  right: 18px;
+  bottom: 128px;
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 32px;
+  padding: 0 11px;
+  border: 1px solid rgba(37, 99, 235, 0.18);
+  border-radius: 999px;
+  color: #1d4ed8;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 10px 28px rgba(22, 34, 51, 0.14);
+  font: inherit;
+  font-size: 12px;
+  backdrop-filter: blur(12px);
+}
+
 .message-row {
   display: flex;
   align-items: flex-end;
@@ -1846,6 +2015,8 @@ async function convertSelectedFile() {
 
 .message-row.assistant .message-stack {
   justify-items: start;
+  width: min(86%, 860px);
+  max-width: 86%;
 }
 
 .message {
@@ -1879,27 +2050,6 @@ async function convertSelectedFile() {
   box-shadow: 0 8px 18px rgba(30, 41, 59, 0.08);
 }
 
-.edit-message {
-  display: grid;
-  gap: 8px;
-  min-width: min(320px, 70vw);
-}
-
-.edit-message textarea {
-  width: 100%;
-  min-height: 76px;
-  resize: vertical;
-  border: 1px solid rgba(147, 165, 255, 0.45);
-  border-radius: 12px;
-  padding: 9px 10px;
-  color: #172033;
-  background: #ffffff;
-  font: inherit;
-  line-height: 1.5;
-  outline: none;
-}
-
-.edit-message div,
 .tool-confirmation div {
   display: flex;
   flex-wrap: wrap;
@@ -1919,11 +2069,13 @@ async function convertSelectedFile() {
 }
 
 .agent-steps {
-  margin: 0 0 9px;
+  width: 100%;
+  margin: 0 0 3px;
   border: 1px solid rgba(20, 184, 166, 0.18);
   border-radius: 12px;
   background: rgba(240, 253, 250, 0.72);
   overflow: hidden;
+  box-shadow: 0 8px 22px rgba(20, 184, 166, 0.06);
 }
 
 .agent-steps:last-child {
@@ -2041,6 +2193,11 @@ async function convertSelectedFile() {
   border-color: #2563eb;
   background: #2563eb;
   border-bottom-right-radius: 6px;
+}
+
+.message-row.user.editing .message {
+  outline: 3px solid rgba(37, 99, 235, 0.16);
+  box-shadow: 0 12px 30px rgba(37, 99, 235, 0.14);
 }
 
 .message-row.assistant .message {
@@ -2279,6 +2436,30 @@ async function convertSelectedFile() {
   min-width: 0;
 }
 
+.composer-edit-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid rgba(37, 99, 235, 0.18);
+  border-radius: 12px;
+  color: #1e40af;
+  background: rgba(239, 246, 255, 0.9);
+  font-size: 12px;
+}
+
+.composer-edit-banner span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .model-picker,
 .search-toggle {
   height: 32px;
@@ -2318,15 +2499,17 @@ async function convertSelectedFile() {
 
 .input-bar {
   display: grid;
-  grid-template-columns: 1fr 42px;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
   align-items: stretch;
 }
 
 .input-bar textarea {
   min-width: 0;
+  min-height: 46px;
   resize: none;
-  max-height: 120px;
+  max-height: 160px;
+  overflow-y: hidden;
   padding: 11px 12px;
   border: 1px solid rgba(103, 119, 150, 0.18);
   border-radius: 14px;
@@ -2358,15 +2541,23 @@ select:disabled {
   width: 42px;
   min-width: 42px;
   height: auto;
+  padding: 0;
   border: 0;
   border-radius: 14px;
   color: #ffffff;
   background: #2563eb;
   box-shadow: 0 12px 24px rgba(37, 99, 235, 0.24);
+  white-space: nowrap;
 }
 
 .send-button:hover:not(:disabled) {
   background: #1d4ed8;
+}
+
+.send-button.editing {
+  width: 76px;
+  min-width: 76px;
+  padding: 0 12px;
 }
 
 .send-button.stop {

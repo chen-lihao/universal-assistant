@@ -73,6 +73,7 @@ let petManualControlUntil = 0
 let petPointerActive = false
 let petRoamTimer: ReturnType<typeof setTimeout> | null = null
 let chatTransition: 'showing' | 'hiding' | null = null
+let chatLogicalVisible = false
 const windowAnimationTimers = new Map<number, ReturnType<typeof setTimeout>>()
 const windowOpacityTimers = new Map<number, ReturnType<typeof setTimeout>>()
 const grantedFiles = new Set<string>()
@@ -214,8 +215,16 @@ function createChatWindow() {
     stopPetFollow()
   })
   chatWindow.on('hide', () => {
+    chatLogicalVisible = false
     stopPetFollow()
     schedulePetRoam()
+  })
+  chatWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.key === 'Escape' && input.type === 'keyDown' && chatLogicalVisible) {
+      event.preventDefault()
+      setPetState('idle')
+      hideChatWindowAnimated()
+    }
   })
   chatWindow.on('move', syncPetWindowToChatWindow)
   chatWindow.on('resize', syncPetWindowToChatWindow)
@@ -911,6 +920,7 @@ function showChatWindowAnimated() {
   }
 
   if (chatWindow.isVisible() && chatTransition !== 'hiding') {
+    chatLogicalVisible = true
     chatWindow.focus()
     return
   }
@@ -928,6 +938,7 @@ function showChatWindowAnimated() {
   cancelWindowAnimation(chatWindow)
   cancelWindowOpacityAnimation(chatWindow)
   chatTransition = 'showing'
+  chatLogicalVisible = true
   chatWindow.setMinimumSize(1, 1)
 
   if (!chatWindow.isVisible()) {
@@ -949,6 +960,7 @@ function showChatWindowAnimated() {
 }
 
 function hideChatWindowAnimated() {
+  chatLogicalVisible = false
   if (!chatWindow || !chatWindow.isVisible()) {
     return
   }
@@ -961,6 +973,7 @@ function hideChatWindowAnimated() {
   const collapsed = getChatCollapsedBounds()
   if (!collapsed) {
     chatWindow.hide()
+    chatLogicalVisible = false
     return
   }
 
@@ -1074,7 +1087,7 @@ function toggleChatWindow() {
     return
   }
 
-  if (chatWindow.isVisible()) {
+  if (chatLogicalVisible && chatWindow.isFocused()) {
     setPetState('idle')
     hideChatWindowAnimated()
     return

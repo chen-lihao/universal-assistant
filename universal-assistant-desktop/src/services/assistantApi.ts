@@ -57,7 +57,7 @@ export type AgentStep = {
 }
 
 export type ChatStreamEvent = {
-  type: 'status' | 'meta' | 'agent_step' | 'tool_confirmation_required' | 'delta' | 'done' | 'error'
+  type: 'status' | 'meta' | 'agent_step' | 'tool_confirmation_required' | 'answer_reset' | 'delta' | 'done' | 'error'
   phase?: ChatStreamPhase
   message?: string
   content?: string

@@ -30,6 +30,9 @@ class ConversationServiceTests {
     @Autowired
     private AgentRunService agentRunService;
 
+    @Autowired
+    private PendingAgentActionService pendingAgentActionService;
+
     @Test
     void editResendKeepsFinalizedAssistantMessageVisible() {
         ConversationEntity conversation = conversationService.getOrCreateConversation(null, "旧问题");
@@ -98,5 +101,32 @@ class ConversationServiceTests {
         );
 
         assertTrue(savedMessage != null && savedMessage.getContent().contains("没有收到模型正文"));
+    }
+
+    @Test
+    void pendingWeatherFollowUpConsumesShortConfirmation() {
+        ConversationEntity conversation = conversationService.getOrCreateConversation(null, "广州天气");
+        conversationService.saveUserMessage(conversation, "广州今天适合去哪些景点？");
+        MessageEntity assistantMessage = conversationService.saveAssistantMessage(
+                conversation,
+                "目前只查到了今天的天气。如果你想让我帮你对比未来几天找出最佳出行日，我可以再查接下来几天的预报。需要吗？",
+                "deepseek-v4-pro",
+                false,
+                true,
+                List.of()
+        );
+        pendingAgentActionService.registerFromAssistantTurn(
+                conversation,
+                assistantMessage,
+                "广州今天适合去哪些景点？",
+                assistantMessage.getContent()
+        );
+
+        MessageEntity confirmation = conversationService.saveUserMessage(conversation, "需要");
+        PendingAgentActionService.PendingActionResolution resolution = pendingAgentActionService.resolve(conversation, confirmation, "需要");
+
+        assertTrue(resolution.confirmed());
+        assertTrue(resolution.effectiveMessage().contains("未来3天天气预报"));
+        assertTrue(pendingAgentActionService.latestWaitingAction(conversation).isEmpty());
     }
 }

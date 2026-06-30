@@ -13,7 +13,73 @@ const markdown = new MarkdownIt({
   linkify: true,
 }).enable('table')
 
-const renderedContent = computed(() => DOMPurify.sanitize(markdown.render(props.content || '')))
+function isTableLine(line: string) {
+  const trimmed = line.trim()
+  return trimmed.startsWith('|') && trimmed.endsWith('|') && (trimmed.match(/\|/g)?.length || 0) >= 2
+}
+
+function isTableSeparator(line: string) {
+  return /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(line.trim())
+}
+
+function isHorizontalRule(line: string) {
+  return /^\s{0,3}(-{3,}|\*{3,}|_{3,})\s*$/.test(line)
+}
+
+function normalizeMarkdown(content: string) {
+  const normalizedLines: string[] = []
+  const lines = (content || '').replace(/\r\n/g, '\n').split('\n')
+  let inFence = false
+
+  const pushBlankIfNeeded = () => {
+    if (normalizedLines.length > 0 && normalizedLines[normalizedLines.length - 1].trim()) {
+      normalizedLines.push('')
+    }
+  }
+
+  const previousLine = () => {
+    for (let i = normalizedLines.length - 1; i >= 0; i -= 1) {
+      if (normalizedLines[i].trim()) {
+        return normalizedLines[i]
+      }
+    }
+    return ''
+  }
+
+  for (const rawLine of lines) {
+    let line = rawLine
+    if (/^\s*```/.test(line) || /^\s*~~~/.test(line)) {
+      inFence = !inFence
+      normalizedLines.push(line)
+      continue
+    }
+
+    if (!inFence) {
+      const headingTable = line.match(/^(#{1,6}\s+.*?)(\s+\|[^|]+(?:\|[^|]+)+\|\s*)$/)
+      if (headingTable) {
+        normalizedLines.push(headingTable[1].trimEnd())
+        normalizedLines.push('')
+        line = headingTable[2].trimStart()
+      }
+
+      if (isHorizontalRule(line)) {
+        pushBlankIfNeeded()
+      } else if ((isTableLine(line) || isTableSeparator(line)) && !isTableLine(previousLine()) && !isTableSeparator(previousLine())) {
+        pushBlankIfNeeded()
+      }
+    }
+
+    normalizedLines.push(line)
+
+    if (!inFence && isHorizontalRule(line)) {
+      normalizedLines.push('')
+    }
+  }
+
+  return normalizedLines.join('\n').replace(/\n{3,}/g, '\n\n')
+}
+
+const renderedContent = computed(() => DOMPurify.sanitize(markdown.render(normalizeMarkdown(props.content || ''))))
 </script>
 
 <template>

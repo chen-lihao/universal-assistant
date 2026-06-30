@@ -26,6 +26,7 @@ public class WeatherQueryPlanner {
     private static final Pattern CHINESE_MONTH_DAY_PATTERN = Pattern.compile("(\\d{1,2})\\s*月\\s*(\\d{1,2})\\s*(?:日|号)?");
     private static final Pattern SHORT_MONTH_DAY_PATTERN = Pattern.compile("(?<!\\d)(\\d{1,2})[/-](\\d{1,2})(?!\\d)");
     private static final Pattern FUTURE_DAYS_PATTERN = Pattern.compile("未来\\s*([一二两三四五六七八九十\\d]+)\\s*天");
+    private static final Pattern FUTURE_SOME_DAYS_PATTERN = Pattern.compile("(?:未来|接下来|随后|后续)\\s*几\\s*天");
     private static final Pattern WEEKDAY_PATTERN = Pattern.compile("(?:本周|这周|下周|周|星期)([一二三四五六日天])");
 
     private static final Map<String, String> POI_TO_REGION = orderedMap(
@@ -200,6 +201,12 @@ public class WeatherQueryPlanner {
                 dates.put(date.toString(), new DateCandidate(i == 0 ? "今天" : date.toString(), date));
             }
         }
+        if (dates.isEmpty() && FUTURE_SOME_DAYS_PATTERN.matcher(normalized).find()) {
+            for (int i = 0; i < 3; i++) {
+                LocalDate date = today.plusDays(i);
+                dates.put(date.toString(), new DateCandidate(i == 0 ? "今天" : date.toString(), date));
+            }
+        }
 
         if (normalized.contains("明后天")) {
             dates.put(today.plusDays(1).toString(), new DateCandidate("明天", today.plusDays(1)));
@@ -334,6 +341,8 @@ public class WeatherQueryPlanner {
         return message.contains("这些")
                 || message.contains("上述")
                 || message.contains("上面")
+                || message.contains("上一轮")
+                || message.contains("上轮")
                 || message.contains("刚才")
                 || message.contains("前面")
                 || message.contains("行程")

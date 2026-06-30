@@ -60,6 +60,7 @@ let petManualControlUntil = 0;
 let petPointerActive = false;
 let petRoamTimer = null;
 let chatTransition = null;
+let chatLogicalVisible = false;
 const windowAnimationTimers = /* @__PURE__ */ new Map();
 const windowOpacityTimers = /* @__PURE__ */ new Map();
 const grantedFiles = /* @__PURE__ */ new Set();
@@ -182,8 +183,16 @@ function createChatWindow() {
     stopPetFollow();
   });
   chatWindow.on("hide", () => {
+    chatLogicalVisible = false;
     stopPetFollow();
     schedulePetRoam();
+  });
+  chatWindow.webContents.on("before-input-event", (event, input) => {
+    if (input.key === "Escape" && input.type === "keyDown" && chatLogicalVisible) {
+      event.preventDefault();
+      setPetState("idle");
+      hideChatWindowAnimated();
+    }
   });
   chatWindow.on("move", syncPetWindowToChatWindow);
   chatWindow.on("resize", syncPetWindowToChatWindow);
@@ -754,6 +763,7 @@ function showChatWindowAnimated() {
     return;
   }
   if (chatWindow.isVisible() && chatTransition !== "hiding") {
+    chatLogicalVisible = true;
     chatWindow.focus();
     return;
   }
@@ -768,6 +778,7 @@ function showChatWindowAnimated() {
   cancelWindowAnimation(chatWindow);
   cancelWindowOpacityAnimation(chatWindow);
   chatTransition = "showing";
+  chatLogicalVisible = true;
   chatWindow.setMinimumSize(1, 1);
   if (!chatWindow.isVisible()) {
     setWindowBounds(chatWindow, collapsed);
@@ -785,6 +796,7 @@ function showChatWindowAnimated() {
   animateWindowOpacity(chatWindow, 1, CHAT_TRANSITION_MS);
 }
 function hideChatWindowAnimated() {
+  chatLogicalVisible = false;
   if (!chatWindow || !chatWindow.isVisible()) {
     return;
   }
@@ -795,6 +807,7 @@ function hideChatWindowAnimated() {
   const collapsed = getChatCollapsedBounds();
   if (!collapsed) {
     chatWindow.hide();
+    chatLogicalVisible = false;
     return;
   }
   cancelWindowAnimation(chatWindow);
@@ -886,7 +899,7 @@ function toggleChatWindow() {
     showChatWindow();
     return;
   }
-  if (chatWindow.isVisible()) {
+  if (chatLogicalVisible && chatWindow.isFocused()) {
     setPetState("idle");
     hideChatWindowAnimated();
     return;
