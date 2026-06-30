@@ -9,9 +9,9 @@ const props = defineProps<{
 
 const markdown = new MarkdownIt({
   breaks: true,
-  html: false,
+  html: true,
   linkify: true,
-})
+}).enable('table')
 
 const renderedContent = computed(() => DOMPurify.sanitize(markdown.render(props.content || '')))
 </script>
@@ -120,18 +120,27 @@ const renderedContent = computed(() => DOMPurify.sanitize(markdown.render(props.
   display: block;
   overflow-x: auto;
   width: 100%;
+  min-width: min(520px, 100%);
   margin: 10px 0;
   border-collapse: collapse;
+  border-spacing: 0;
+  white-space: normal;
 }
 
 .markdown-message :deep(th),
 .markdown-message :deep(td) {
   padding: 7px 9px;
   border: 1px solid rgba(103, 119, 150, 0.2);
+  text-align: left;
+  vertical-align: top;
 }
 
 .markdown-message :deep(th) {
   background: #f8fafc;
   font-weight: 700;
+}
+
+.markdown-message :deep(tbody tr:nth-child(even)) {
+  background: rgba(248, 250, 252, 0.75);
 }
 </style>

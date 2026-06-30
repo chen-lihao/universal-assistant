@@ -9,4 +9,6 @@ import java.util.UUID;
 public interface ConversationSummaryRepository extends JpaRepository<ConversationSummaryEntity, UUID> {
 
     Optional<ConversationSummaryEntity> findByConversation_Id(UUID conversationId);
+
+    void deleteByConversation_Id(UUID conversationId);
 }

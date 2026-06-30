@@ -16,8 +16,8 @@ const CHAT_WINDOW_WIDTH = 440;
 const CHAT_WINDOW_HEIGHT = 640;
 const CHAT_WINDOW_MIN_WIDTH = 380;
 const CHAT_WINDOW_MIN_HEIGHT = 520;
-const PET_WINDOW_WIDTH = 320;
-const PET_WINDOW_HEIGHT = 360;
+const PET_WINDOW_WIDTH = 250;
+const PET_WINDOW_HEIGHT = 330;
 const FOLLOW_STEP_MS = 16;
 const FOLLOW_STIFFNESS = 0.2;
 const ROAM_MIN_DELAY_MS = 2e4;
@@ -59,6 +59,7 @@ let petFollowTimer = null;
 let petManualControlUntil = 0;
 let petPointerActive = false;
 let petRoamTimer = null;
+let chatTransition = null;
 const windowAnimationTimers = /* @__PURE__ */ new Map();
 const windowOpacityTimers = /* @__PURE__ */ new Map();
 const grantedFiles = /* @__PURE__ */ new Set();
@@ -143,6 +144,7 @@ function createPetWindow() {
   });
   petWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   petWindow.setAlwaysOnTop(true, "floating");
+  petWindow.setIgnoreMouseEvents(true, { forward: true });
   petWindow.once("ready-to-show", () => {
     petWindow == null ? void 0 : petWindow.show();
     schedulePetRoam();
@@ -188,6 +190,7 @@ function createChatWindow() {
   chatWindow.on("closed", () => {
     stopPetFollow();
     clearMoveSyncSuppressions();
+    chatTransition = null;
     if (chatWindow) {
       cancelWindowAnimation(chatWindow);
       cancelWindowOpacityAnimation(chatWindow);
@@ -750,6 +753,13 @@ function showChatWindowAnimated() {
   if (!chatWindow) {
     return;
   }
+  if (chatWindow.isVisible() && chatTransition !== "hiding") {
+    chatWindow.focus();
+    return;
+  }
+  if (chatTransition === "showing") {
+    return;
+  }
   const target = getChatWindowTargetBounds();
   const collapsed = getChatCollapsedBounds();
   if (!target || !collapsed) {
@@ -757,18 +767,28 @@ function showChatWindowAnimated() {
   }
   cancelWindowAnimation(chatWindow);
   cancelWindowOpacityAnimation(chatWindow);
+  chatTransition = "showing";
   chatWindow.setMinimumSize(1, 1);
-  setWindowBounds(chatWindow, collapsed);
-  chatWindow.setOpacity(0.72);
-  chatWindow.show();
+  if (!chatWindow.isVisible()) {
+    setWindowBounds(chatWindow, collapsed);
+    chatWindow.setOpacity(0.72);
+    chatWindow.show();
+  }
   chatWindow.focus();
   animateWindowBounds(chatWindow, target, CHAT_TRANSITION_MS, () => {
-    chatWindow == null ? void 0 : chatWindow.setMinimumSize(CHAT_WINDOW_MIN_WIDTH, CHAT_WINDOW_MIN_HEIGHT);
+    if (!chatWindow || chatWindow.isDestroyed()) {
+      return;
+    }
+    chatWindow.setMinimumSize(CHAT_WINDOW_MIN_WIDTH, CHAT_WINDOW_MIN_HEIGHT);
+    chatTransition = null;
   });
   animateWindowOpacity(chatWindow, 1, CHAT_TRANSITION_MS);
 }
 function hideChatWindowAnimated() {
   if (!chatWindow || !chatWindow.isVisible()) {
+    return;
+  }
+  if (chatTransition === "hiding") {
     return;
   }
   const start = chatWindow.getBounds();
@@ -779,6 +799,7 @@ function hideChatWindowAnimated() {
   }
   cancelWindowAnimation(chatWindow);
   cancelWindowOpacityAnimation(chatWindow);
+  chatTransition = "hiding";
   chatWindow.setMinimumSize(1, 1);
   animateWindowBounds(chatWindow, collapsed, CHAT_TRANSITION_MS, () => {
     if (!chatWindow || chatWindow.isDestroyed()) {
@@ -793,6 +814,7 @@ function hideChatWindowAnimated() {
     });
     chatWindow.setMinimumSize(CHAT_WINDOW_MIN_WIDTH, CHAT_WINDOW_MIN_HEIGHT);
     chatWindow.setOpacity(1);
+    chatTransition = null;
   });
   animateWindowOpacity(chatWindow, 0.18, CHAT_TRANSITION_MS);
 }
@@ -826,6 +848,7 @@ function movePetWindowBy(deltaX, deltaY) {
 }
 function setPetPointerActive(active) {
   petPointerActive = Boolean(active);
+  petWindow == null ? void 0 : petWindow.setIgnoreMouseEvents(!petPointerActive, { forward: true });
   if (petPointerActive) {
     petManualControlUntil = Date.now() + 900;
     stopPetFollow();
@@ -837,6 +860,18 @@ function setPetPointerActive(active) {
     schedulePetRoam();
   }
 }
+function showChatWindow() {
+  if (!chatWindow) {
+    createChatWindow();
+  }
+  if (!chatWindow) {
+    return;
+  }
+  cancelPetRoam();
+  stopPetFollow();
+  setPetState("idle");
+  showChatWindowAnimated();
+}
 function toggleChatWindow() {
   if (!chatWindow) {
     createChatWindow();
@@ -844,15 +879,19 @@ function toggleChatWindow() {
   if (!chatWindow) {
     return;
   }
+  if (chatTransition === "showing") {
+    return;
+  }
+  if (chatTransition === "hiding") {
+    showChatWindow();
+    return;
+  }
   if (chatWindow.isVisible()) {
     setPetState("idle");
     hideChatWindowAnimated();
     return;
   }
-  cancelPetRoam();
-  stopPetFollow();
-  setPetState("idle");
-  showChatWindowAnimated();
+  showChatWindow();
 }
 function sendCurrentPetState() {
   if (!petWindow || petWindow.isDestroyed()) {
@@ -1135,6 +1174,7 @@ ${content}`;
 }
 function registerIpcHandlers() {
   ipcMain.handle("assistant:toggle-chat", () => toggleChatWindow());
+  ipcMain.handle("assistant:show-chat", () => showChatWindow());
   ipcMain.handle("assistant:hide-chat", () => {
     setPetState("idle");
     hideChatWindowAnimated();

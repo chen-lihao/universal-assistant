@@ -54,7 +54,8 @@ public class MemoryService {
                     """
                             SELECT id, content, GREATEST(0, 1 - (embedding <=> ?::vector)) AS score
                             FROM memory_items
-                            WHERE conversation_id = ? OR conversation_id IS NULL
+                            WHERE invalidated_at IS NULL
+                              AND (conversation_id = ? OR conversation_id IS NULL)
                             ORDER BY embedding <=> ?::vector
                             LIMIT ?
                             """,
@@ -108,6 +109,29 @@ public class MemoryService {
             );
         } catch (DataAccessException ignored) {
             // Memory is an enhancement. Chat should still work if pgvector is unavailable.
+        }
+    }
+
+    public void invalidateAfter(UUID conversationId, Instant createdAt) {
+        if (conversationId == null || createdAt == null) {
+            return;
+        }
+
+        try {
+            jdbcTemplate.update(
+                    """
+                            UPDATE memory_items
+                            SET invalidated_at = ?
+                            WHERE conversation_id = ?
+                              AND invalidated_at IS NULL
+                              AND created_at > ?
+                            """,
+                    Instant.now(),
+                    conversationId,
+                    createdAt
+            );
+        } catch (DataAccessException ignored) {
+            // Memory invalidation should not block editing conversation history.
         }
     }
 

@@ -7,6 +7,7 @@ import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.PrePersist;
+import jakarta.persistence.PreUpdate;
 import jakarta.persistence.Table;
 
 import java.time.Instant;
@@ -41,6 +42,18 @@ public class MessageEntity {
     @Column(name = "sources_json", columnDefinition = "text")
     private String sourcesJson;
 
+    @Column(nullable = false, length = 24)
+    private String status = "completed";
+
+    @Column(nullable = false)
+    private int revision = 1;
+
+    @Column(name = "edited_at")
+    private Instant editedAt;
+
+    @Column(name = "invalidated_at")
+    private Instant invalidatedAt;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
@@ -51,6 +64,22 @@ public class MessageEntity {
         }
         if (createdAt == null) {
             createdAt = Instant.now();
+        }
+        if (status == null) {
+            status = "completed";
+        }
+        if (revision <= 0) {
+            revision = 1;
+        }
+    }
+
+    @PreUpdate
+    void preUpdate() {
+        if (status == null) {
+            status = "completed";
+        }
+        if (revision <= 0) {
+            revision = 1;
         }
     }
 
@@ -116,6 +145,38 @@ public class MessageEntity {
 
     public void setSourcesJson(String sourcesJson) {
         this.sourcesJson = sourcesJson;
+    }
+
+    public String getStatus() {
+        return status;
+    }
+
+    public void setStatus(String status) {
+        this.status = status;
+    }
+
+    public int getRevision() {
+        return revision;
+    }
+
+    public void setRevision(int revision) {
+        this.revision = revision;
+    }
+
+    public Instant getEditedAt() {
+        return editedAt;
+    }
+
+    public void setEditedAt(Instant editedAt) {
+        this.editedAt = editedAt;
+    }
+
+    public Instant getInvalidatedAt() {
+        return invalidatedAt;
+    }
+
+    public void setInvalidatedAt(Instant invalidatedAt) {
+        this.invalidatedAt = invalidatedAt;
     }
 
     public Instant getCreatedAt() {

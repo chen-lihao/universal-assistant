@@ -11,12 +11,16 @@ import com.hao.universalassistantbackend.service.ChatService;
 import com.hao.universalassistantbackend.service.ConversationService;
 import com.hao.universalassistantbackend.service.SearchService;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hao.universalassistantbackend.model.CancelAgentRunRequest;
+import com.hao.universalassistantbackend.model.UpdateConversationRequest;
 import org.springframework.http.CacheControl;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.util.StringUtils;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -69,9 +73,26 @@ public class AssistantController {
         return ResponseEntity.ok(conversationService.createConversation(request == null ? null : request.title()));
     }
 
+    @PatchMapping("/conversations/{conversationId}")
+    public ResponseEntity<ConversationResponse> renameConversation(@PathVariable String conversationId,
+                                                                   @RequestBody(required = false) UpdateConversationRequest request) {
+        return ResponseEntity.ok(conversationService.renameConversation(conversationId, request == null ? null : request.title()));
+    }
+
+    @DeleteMapping("/conversations/{conversationId}")
+    public ResponseEntity<ConversationResponse> archiveConversation(@PathVariable String conversationId) {
+        return ResponseEntity.ok(conversationService.archiveConversation(conversationId));
+    }
+
     @GetMapping("/conversations/{conversationId}/messages")
     public ResponseEntity<ConversationMessagesResponse> conversationMessages(@PathVariable String conversationId) {
         return ResponseEntity.ok(conversationService.getMessages(conversationId));
+    }
+
+    @PostMapping("/agent-runs/{agentRunId}/cancel")
+    public ResponseEntity<ChatResponse> cancelAgentRun(@PathVariable String agentRunId,
+                                                       @RequestBody(required = false) CancelAgentRunRequest request) {
+        return ResponseEntity.ok(chatService.cancelAgentRun(agentRunId, request));
     }
 
     @PostMapping(value = "/chat/stream", produces = "application/x-ndjson")

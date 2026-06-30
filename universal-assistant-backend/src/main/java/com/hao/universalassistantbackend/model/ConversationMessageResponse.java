@@ -12,6 +12,14 @@ public record ConversationMessageResponse(
         Boolean realtimeSearchUsed,
         Boolean modelAvailable,
         List<SearchResult> sources,
+        String status,
+        int revision,
+        Instant editedAt,
+        UUID agentRunId,
+        List<AgentStepResponse> agentSteps,
+        String pendingToolName,
+        String pendingToolInput,
+        String pendingToolReason,
         Instant createdAt
 ) {
 }

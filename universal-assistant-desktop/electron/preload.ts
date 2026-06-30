@@ -6,6 +6,7 @@ type PetAction = 'wave' | 'jump' | 'fireworks' | 'run' | 'sleep' | 'idle'
 
 contextBridge.exposeInMainWorld('assistant', {
   toggleChat: () => ipcRenderer.invoke('assistant:toggle-chat'),
+  showChat: () => ipcRenderer.invoke('assistant:show-chat'),
   hideChat: () => ipcRenderer.invoke('assistant:hide-chat'),
   getBackendUrl: () => ipcRenderer.invoke('assistant:get-backend-url'),
   setPetState: (state: PetState) => ipcRenderer.invoke('assistant:set-pet-state', state),

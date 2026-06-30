@@ -16,6 +16,9 @@ export type ChatRequest = {
   model?: string
   history?: ChatMessage[]
   conversationId?: string
+  editMessageId?: string
+  agentRunId?: string
+  toolDecision?: 'approved' | 'denied'
 }
 
 export type ChatResponse = {
@@ -30,7 +33,17 @@ export type ChatResponse = {
   agentSteps?: AgentStep[]
 }
 
-export type ChatStreamPhase = 'thinking' | 'planning' | 'acting' | 'searching' | 'reflecting' | 'answering' | 'done' | 'error'
+export type ChatStreamPhase =
+  | 'thinking'
+  | 'planning'
+  | 'acting'
+  | 'searching'
+  | 'waiting_confirmation'
+  | 'reflecting'
+  | 'answering'
+  | 'cancelled'
+  | 'done'
+  | 'error'
 
 export type AgentStep = {
   id: string
@@ -44,7 +57,7 @@ export type AgentStep = {
 }
 
 export type ChatStreamEvent = {
-  type: 'status' | 'meta' | 'agent_step' | 'delta' | 'done' | 'error'
+  type: 'status' | 'meta' | 'agent_step' | 'tool_confirmation_required' | 'delta' | 'done' | 'error'
   phase?: ChatStreamPhase
   message?: string
   content?: string
@@ -54,8 +67,12 @@ export type ChatStreamEvent = {
   sources?: SearchResult[]
   conversationId?: string
   messageId?: string
+  userMessageId?: string
   agentRunId?: string
   agentStep?: AgentStep
+  toolName?: string
+  toolInput?: string
+  reason?: string
 }
 
 export type ChatStreamHandlers = {
@@ -77,6 +94,14 @@ export type ConversationMessage = {
   realtimeSearchUsed?: boolean
   modelAvailable?: boolean
   sources?: SearchResult[]
+  status?: string
+  revision?: number
+  editedAt?: string
+  agentRunId?: string
+  agentSteps?: AgentStep[]
+  pendingToolName?: string
+  pendingToolInput?: string
+  pendingToolReason?: string
   createdAt: string
 }
 
@@ -152,7 +177,60 @@ export async function loadConversationMessages(conversationId: string) {
   return (await response.json()) as ConversationMessagesResponse
 }
 
-export async function streamChat(request: ChatRequest, handlers: ChatStreamHandlers) {
+export async function updateConversation(conversationId: string, title: string) {
+  const backendUrl = await getBackendUrl()
+  const response = await fetch(`${backendUrl}/api/conversations/${conversationId}`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ title }),
+  })
+
+  if (!response.ok) {
+    throw new Error(`Backend returned ${response.status}`)
+  }
+
+  return (await response.json()) as ConversationSummary
+}
+
+export async function deleteConversation(conversationId: string) {
+  const backendUrl = await getBackendUrl()
+  const response = await fetch(`${backendUrl}/api/conversations/${conversationId}`, {
+    method: 'DELETE',
+  })
+
+  if (!response.ok) {
+    throw new Error(`Backend returned ${response.status}`)
+  }
+
+  return (await response.json()) as ConversationSummary
+}
+
+export async function cancelAgentRun(agentRunId: string, request: Partial<ChatResponse>) {
+  const backendUrl = await getBackendUrl()
+  const response = await fetch(`${backendUrl}/api/agent-runs/${agentRunId}/cancel`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      partialAnswer: request.answer,
+      model: request.model,
+      realtimeSearchUsed: request.realtimeSearchUsed,
+      modelAvailable: request.modelAvailable,
+      sources: request.sources,
+    }),
+  })
+
+  if (!response.ok) {
+    throw new Error(`Backend returned ${response.status}`)
+  }
+
+  return (await response.json()) as ChatResponse
+}
+
+export async function streamChat(request: ChatRequest, handlers: ChatStreamHandlers, signal?: AbortSignal) {
   const backendUrl = await getBackendUrl()
   const response = await fetch(`${backendUrl}/api/chat/stream`, {
     method: 'POST',
@@ -161,6 +239,7 @@ export async function streamChat(request: ChatRequest, handlers: ChatStreamHandl
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(request),
+    signal,
   })
 
   if (!response.ok) {

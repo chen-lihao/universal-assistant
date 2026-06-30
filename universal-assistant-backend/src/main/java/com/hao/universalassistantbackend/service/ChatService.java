@@ -5,12 +5,15 @@ import com.hao.universalassistantbackend.entity.MessageEntity;
 import com.hao.universalassistantbackend.model.AgentMode;
 import com.hao.universalassistantbackend.model.AgentRunContext;
 import com.hao.universalassistantbackend.model.AgentStepResponse;
+import com.hao.universalassistantbackend.model.CancelAgentRunRequest;
 import com.hao.universalassistantbackend.model.ChatMessage;
 import com.hao.universalassistantbackend.model.ChatRequest;
 import com.hao.universalassistantbackend.model.ChatResponse;
 import com.hao.universalassistantbackend.model.ChatStreamEvent;
 import com.hao.universalassistantbackend.model.MemoryHit;
 import com.hao.universalassistantbackend.model.SearchResult;
+import com.hao.universalassistantbackend.model.WeatherPlan;
+import com.hao.universalassistantbackend.model.WeatherQuery;
 import com.hao.universalassistantbackend.model.WeatherReport;
 import com.hao.universalassistantbackend.tools.WeatherTools;
 import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatOptions;
@@ -24,10 +27,13 @@ import org.springframework.util.StringUtils;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -44,6 +50,9 @@ public class ChatService {
     private static final int SUMMARY_MIN_MESSAGES = 12;
     private static final int SUMMARY_REFRESH_INTERVAL = 6;
     private static final int SUMMARY_SOURCE_LIMIT = 20;
+    private static final int PARTIAL_SAVE_CHAR_INTERVAL = 120;
+    private static final long PARTIAL_SAVE_MILLIS = 500L;
+    private static final String CANCELLED_ANSWER = "回答已中断。你可以编辑上一条问题后重新发送。";
     private static final Pattern LEADING_MODEL_COMMAND = Pattern.compile(
             "^\\s*(?:/model\\s+|@)([a-zA-Z0-9_.-]+)(?:\\s+|$)",
             Pattern.CASE_INSENSITIVE
@@ -51,6 +60,7 @@ public class ChatService {
     private static final Pattern ISO_DATE_PATTERN = Pattern.compile("\\d{4}-\\d{2}-\\d{2}");
     private static final Pattern CHINESE_MONTH_DAY_PATTERN = Pattern.compile("\\d{1,2}\\s*月\\s*\\d{1,2}\\s*(?:日|号)?");
     private static final Pattern SHORT_MONTH_DAY_PATTERN = Pattern.compile("(?<!\\d)\\d{1,2}[/-]\\d{1,2}(?!\\d)");
+    private static final ZoneId APP_ZONE = ZoneId.of("Asia/Shanghai");
 
     private static final String SYSTEM_PROMPT = """
             You are Universal Assistant, a desktop AI assistant.
@@ -69,6 +79,7 @@ public class ChatService {
     private final AgentRunService agentRunService;
     private final MemoryService memoryService;
     private final WeatherTools weatherTools;
+    private final WeatherQueryPlanner weatherQueryPlanner;
     private final String dashScopeApiKey;
     private final int maxTokens;
 
@@ -78,6 +89,7 @@ public class ChatService {
                        AgentRunService agentRunService,
                        MemoryService memoryService,
                        WeatherTools weatherTools,
+                       WeatherQueryPlanner weatherQueryPlanner,
                        @Value("${spring.ai.dashscope.api-key:}") String dashScopeApiKey,
                        @Value("${assistant.chat.max-tokens:2400}") int maxTokens) {
         this.chatClientProvider = chatClientProvider;
@@ -86,6 +98,7 @@ public class ChatService {
         this.agentRunService = agentRunService;
         this.memoryService = memoryService;
         this.weatherTools = weatherTools;
+        this.weatherQueryPlanner = weatherQueryPlanner;
         this.dashScopeApiKey = dashScopeApiKey;
         this.maxTokens = maxTokens;
     }
@@ -99,6 +112,12 @@ public class ChatService {
             List<MemoryHit> memories,
             String plan
     ) {
+    }
+
+    private record SearchDecision(boolean needsSearch, String reason, String query) {
+    }
+
+    private record WeatherQueryResult(WeatherQuery query, WeatherReport report, String status) {
     }
 
     public ChatResponse chat(ChatRequest request) {
@@ -121,12 +140,19 @@ public class ChatService {
 
         Boolean requestedSearch = request == null ? null : request.realtimeSearch();
         ConversationEntity conversation = conversationService.getOrCreateConversation(request == null ? null : request.conversationId(), message);
-        String conversationSummary = conversationService.summaryText(conversation.getId()).orElse("");
-        List<ChatMessage> history = conversationService.recentHistory(conversation.getId(), 16);
-        if (history.isEmpty() && request != null && request.history() != null) {
-            history = request.history();
+        MessageEntity userMessage;
+        List<ChatMessage> history;
+        if (request != null && StringUtils.hasText(request.editMessageId())) {
+            userMessage = conversationService.editUserMessageAndInvalidateAfter(conversation.getId().toString(), request.editMessageId(), message);
+            history = conversationService.recentHistoryBefore(conversation.getId(), userMessage.getCreatedAt(), 16);
+        } else {
+            history = conversationService.recentHistory(conversation.getId(), 16);
+            if (history.isEmpty() && request != null && request.history() != null) {
+                history = request.history();
+            }
+            userMessage = conversationService.saveUserMessage(conversation, message);
         }
-        MessageEntity userMessage = conversationService.saveUserMessage(conversation, message);
+        String conversationSummary = conversationService.summaryText(conversation.getId()).orElse("");
         if (shouldAnswerModelIdentity(message)) {
             AgentRunContext runContext = agentRunService.startRun(conversation, userMessage, AgentMode.DIRECT, message, selectedModel);
             addAgentStep(runContext, "thought", "识别模型身份问题", "用户询问当前底层模型，直接使用后端运行时模型元数据回答。", "completed", null);
@@ -146,6 +172,7 @@ public class ChatService {
                     requestedSearch,
                     selectedModel,
                     history,
+                    conversationSummary,
                     chatClient,
                     modelAvailable,
                     null
@@ -201,6 +228,7 @@ public class ChatService {
             if (!StringUtils.hasText(answer)) {
                 answer = fallbackAnswer(agentContext.weatherReport(), agentContext.sources(), true);
             }
+            answer = completeIncompleteAnswerIfNeeded(answer, message, agentContext, false, null);
             answer = applyReflectionIfNeeded(
                     answer,
                     message,
@@ -227,6 +255,11 @@ public class ChatService {
         String selectedModel = resolveModel(request, rawMessage);
 
         emit(consumer, ChatStreamEvent.status("thinking", "思考中"));
+        if (request != null && StringUtils.hasText(request.agentRunId()) && StringUtils.hasText(request.toolDecision())) {
+            continueAgentRunAfterToolDecision(request, selectedModel, consumer);
+            return;
+        }
+
         if (!SUPPORTED_MODELS.containsKey(selectedModel)) {
             emit(consumer, ChatStreamEvent.error("暂不支持模型 " + selectedModel + "。当前可用模型：" + String.join("、", SUPPORTED_MODELS.keySet()) + "。"));
             emit(consumer, ChatStreamEvent.done());
@@ -242,22 +275,29 @@ public class ChatService {
 
         Boolean requestedSearch = request == null ? null : request.realtimeSearch();
         ConversationEntity conversation = conversationService.getOrCreateConversation(request == null ? null : request.conversationId(), message);
-        String conversationSummary = conversationService.summaryText(conversation.getId()).orElse("");
-        List<ChatMessage> history = conversationService.recentHistory(conversation.getId(), 16);
-        if (history.isEmpty() && request != null && request.history() != null) {
-            history = request.history();
+        MessageEntity userMessage;
+        List<ChatMessage> history;
+        if (request != null && StringUtils.hasText(request.editMessageId())) {
+            userMessage = conversationService.editUserMessageAndInvalidateAfter(conversation.getId().toString(), request.editMessageId(), message);
+            history = conversationService.recentHistoryBefore(conversation.getId(), userMessage.getCreatedAt(), 16);
+        } else {
+            history = conversationService.recentHistory(conversation.getId(), 16);
+            if (history.isEmpty() && request != null && request.history() != null) {
+                history = request.history();
+            }
+            userMessage = conversationService.saveUserMessage(conversation, message);
         }
-        MessageEntity userMessage = conversationService.saveUserMessage(conversation, message);
+        String conversationSummary = conversationService.summaryText(conversation.getId()).orElse("");
         if (shouldAnswerModelIdentity(message)) {
             boolean modelAvailable = isModelConfigured();
             AgentRunContext runContext = agentRunService.startRun(conversation, userMessage, AgentMode.DIRECT, message, selectedModel);
-            emit(consumer, ChatStreamEvent.meta(selectedModel, false, modelAvailable, List.of(), conversation.getId(), null, runContext.run().getId()));
+            emit(consumer, ChatStreamEvent.meta(selectedModel, false, modelAvailable, List.of(), conversation.getId(), null, userMessage.getId(), runContext.run().getId()));
             addAgentStep(runContext, "thought", "识别模型身份问题", "用户询问当前底层模型，直接使用后端运行时模型元数据回答。", "completed", consumer);
             String answer = modelIdentityAnswer(selectedModel);
             MessageEntity savedMessage = saveAssistantMessageAndFinalize(conversation, answer, selectedModel, false, modelAvailable, List.of(), runContext, message);
-            emit(consumer, ChatStreamEvent.meta(selectedModel, false, modelAvailable, List.of(), conversation.getId(), savedMessage.getId(), runContext.run().getId()));
+            emit(consumer, ChatStreamEvent.meta(selectedModel, false, modelAvailable, List.of(), conversation.getId(), savedMessage.getId(), userMessage.getId(), runContext.run().getId()));
             emit(consumer, ChatStreamEvent.status("answering", "回答中"));
-            emit(consumer, ChatStreamEvent.delta(answer));
+            emitChunkedDelta(consumer, answer);
             emit(consumer, ChatStreamEvent.done());
             return;
         }
@@ -272,6 +312,7 @@ public class ChatService {
                 requestedSearch,
                 selectedModel,
                 history,
+                conversationSummary,
                 chatClient,
                 modelAvailable,
                 consumer
@@ -283,8 +324,13 @@ public class ChatService {
                 agentContext.sources(),
                 conversation.getId(),
                 null,
+                userMessage.getId(),
                 agentContext.runContext().run().getId()
         ));
+        if ("waiting_confirmation".equals(agentContext.runContext().run().getStatus())) {
+            emit(consumer, ChatStreamEvent.done());
+            return;
+        }
         emit(consumer, ChatStreamEvent.status("answering", "回答中"));
 
         if (agentContext.weatherReport() != null
@@ -301,8 +347,8 @@ public class ChatService {
                     agentContext.runContext(),
                     message
             );
-            emit(consumer, ChatStreamEvent.meta(selectedModel, true, modelAvailable, agentContext.sources(), conversation.getId(), savedMessage.getId(), agentContext.runContext().run().getId()));
-            emit(consumer, ChatStreamEvent.delta(agentContext.weatherReport().summary()));
+            emit(consumer, ChatStreamEvent.meta(selectedModel, true, modelAvailable, agentContext.sources(), conversation.getId(), savedMessage.getId(), userMessage.getId(), agentContext.runContext().run().getId()));
+            emitChunkedDelta(consumer, agentContext.weatherReport().summary());
             emit(consumer, ChatStreamEvent.done());
             return;
         }
@@ -320,14 +366,28 @@ public class ChatService {
                     agentContext.runContext(),
                     message
             );
-            emit(consumer, ChatStreamEvent.meta(selectedModel, agentContext.useSearch(), false, agentContext.sources(), conversation.getId(), savedMessage.getId(), agentContext.runContext().run().getId()));
-            emit(consumer, ChatStreamEvent.delta(answer));
+            emit(consumer, ChatStreamEvent.meta(selectedModel, agentContext.useSearch(), false, agentContext.sources(), conversation.getId(), savedMessage.getId(), userMessage.getId(), agentContext.runContext().run().getId()));
+            emitChunkedDelta(consumer, answer);
             emit(consumer, ChatStreamEvent.done());
             return;
         }
 
+        emit(consumer, ChatStreamEvent.meta(
+                selectedModel,
+                agentContext.useSearch(),
+                modelAvailable,
+                agentContext.sources(),
+                conversation.getId(),
+                null,
+                userMessage.getId(),
+                agentContext.runContext().run().getId()
+        ));
+        agentRunService.updateProgress(agentContext.runContext(), "", agentContext.useSearch(), modelAvailable, agentContext.sources());
+
+        StringBuilder streamedAnswer = new StringBuilder();
+        int[] lastSavedLength = {0};
+        long[] lastSavedAt = {System.currentTimeMillis()};
         try {
-            StringBuilder streamedAnswer = new StringBuilder();
             chatClient.prompt()
                     .system(SYSTEM_PROMPT)
                     .options(DashScopeChatOptions.builder()
@@ -351,7 +411,11 @@ public class ChatService {
                     .map(this::extractStreamContent)
                     .filter(StringUtils::hasText)
                     .doOnNext(content -> {
+                        if (agentRunService.shouldStop(agentContext.runContext().run().getId())) {
+                            throw new AgentRunCancelledException();
+                        }
                         streamedAnswer.append(content);
+                        persistPartialIfNeeded(agentContext.runContext(), streamedAnswer, agentContext.useSearch(), modelAvailable, agentContext.sources(), lastSavedLength, lastSavedAt);
                         try {
                             consumer.accept(ChatStreamEvent.delta(content));
                         } catch (IOException ex) {
@@ -359,6 +423,12 @@ public class ChatService {
                         }
                     })
                     .blockLast();
+
+            if (agentRunService.shouldStop(agentContext.runContext().run().getId())) {
+                saveCancelledPartial(conversation, streamedAnswer.toString(), selectedModel, agentContext.useSearch(), true, agentContext.sources(), agentContext.runContext(), message);
+                return;
+            }
+            agentRunService.updateProgress(agentContext.runContext(), streamedAnswer.toString(), agentContext.useSearch(), true, agentContext.sources());
 
             if (!StringUtils.hasText(streamedAnswer.toString())) {
                 String fallbackAnswer = fallbackAnswer(agentContext.weatherReport(), agentContext.sources(), true);
@@ -373,14 +443,24 @@ public class ChatService {
                             agentContext.runContext(),
                             message
                     );
-                    emit(consumer, ChatStreamEvent.meta(selectedModel, agentContext.useSearch(), true, agentContext.sources(), conversation.getId(), savedMessage.getId(), agentContext.runContext().run().getId()));
-                    emit(consumer, ChatStreamEvent.delta(fallbackAnswer));
+                    emit(consumer, ChatStreamEvent.meta(selectedModel, agentContext.useSearch(), true, agentContext.sources(), conversation.getId(), savedMessage.getId(), userMessage.getId(), agentContext.runContext().run().getId()));
+                    emitChunkedDelta(consumer, fallbackAnswer);
                 } else {
+                    String errorMessage = "没有收到模型返回内容。";
+                    agentRunService.failRun(agentContext.runContext(), errorMessage, "");
                     emit(consumer, ChatStreamEvent.error("没有收到模型返回内容。"));
                 }
             } else {
-                String finalAnswer = applyReflectionIfNeeded(
+                String completedAnswer = completeIncompleteAnswerIfNeeded(
                         streamedAnswer.toString(),
+                        message,
+                        agentContext,
+                        true,
+                        consumer
+                );
+                agentRunService.updateProgress(agentContext.runContext(), completedAnswer, agentContext.useSearch(), true, agentContext.sources());
+                String finalAnswer = applyReflectionIfNeeded(
+                        completedAnswer,
                         message,
                         agentContext,
                         chatClient,
@@ -388,6 +468,7 @@ public class ChatService {
                         true,
                         consumer
                 );
+                agentRunService.updateProgress(agentContext.runContext(), finalAnswer, agentContext.useSearch(), true, agentContext.sources());
                 MessageEntity savedMessage = saveAssistantMessageAndFinalize(
                         conversation,
                         finalAnswer,
@@ -398,19 +479,28 @@ public class ChatService {
                         agentContext.runContext(),
                         message
                 );
-                emit(consumer, ChatStreamEvent.meta(selectedModel, agentContext.useSearch(), true, agentContext.sources(), conversation.getId(), savedMessage.getId(), agentContext.runContext().run().getId()));
+                emit(consumer, ChatStreamEvent.meta(selectedModel, agentContext.useSearch(), true, agentContext.sources(), conversation.getId(), savedMessage.getId(), userMessage.getId(), agentContext.runContext().run().getId()));
             }
 
             emit(consumer, ChatStreamEvent.done());
+        } catch (AgentRunCancelledException ex) {
+            saveCancelledPartial(conversation, streamedAnswer.toString(), selectedModel, agentContext.useSearch(), modelAvailable, agentContext.sources(), agentContext.runContext(), message);
         } catch (UncheckedIOException ex) {
+            saveCancelledPartial(conversation, streamedAnswer.toString(), selectedModel, agentContext.useSearch(), modelAvailable, agentContext.sources(), agentContext.runContext(), message);
             throw ex.getCause();
         } catch (RuntimeException ex) {
             String fallback = fallbackAnswer(agentContext.weatherReport(), agentContext.sources(), true);
-            String answer = StringUtils.hasText(fallback)
-                    ? "模型调用失败：" + ex.getMessage() + "\n\n" + fallback
-                    : "模型调用失败：" + ex.getMessage();
+            String partial = streamedAnswer.toString();
+            String answer = StringUtils.hasText(partial) ? partial : fallback;
             if (StringUtils.hasText(answer)) {
-                addAgentStep(agentContext.runContext(), "error", "模型调用失败", ex.getMessage(), "failed", consumer);
+                addAgentStep(
+                        agentContext.runContext(),
+                        "warning",
+                        "模型调用中断，返回降级结果",
+                        "模型流式调用中断：" + ex.getMessage() + "。已使用已有回答、天气工具或检索结果完成本次回复。",
+                        "degraded",
+                        consumer
+                );
                 MessageEntity savedMessage = saveAssistantMessageAndFinalize(
                         conversation,
                         answer,
@@ -421,13 +511,235 @@ public class ChatService {
                         agentContext.runContext(),
                         message
                 );
-                emit(consumer, ChatStreamEvent.meta(selectedModel, agentContext.useSearch(), false, agentContext.sources(), conversation.getId(), savedMessage.getId(), agentContext.runContext().run().getId()));
-                emit(consumer, ChatStreamEvent.delta(answer));
-            } else {
-                emit(consumer, ChatStreamEvent.error("模型调用失败：" + ex.getMessage()));
-                if (!agentContext.sources().isEmpty()) {
-                    emit(consumer, ChatStreamEvent.delta("\n\n" + fallbackSearchSummary(agentContext.sources())));
+                emit(consumer, ChatStreamEvent.meta(selectedModel, agentContext.useSearch(), false, agentContext.sources(), conversation.getId(), savedMessage.getId(), userMessage.getId(), agentContext.runContext().run().getId()));
+                if (!StringUtils.hasText(partial)) {
+                    emitChunkedDelta(consumer, answer);
                 }
+            } else {
+                addAgentStep(agentContext.runContext(), "error", "模型调用失败", ex.getMessage(), "failed", consumer);
+                agentRunService.failRun(agentContext.runContext(), "模型调用失败：" + ex.getMessage(), partial);
+                emit(consumer, ChatStreamEvent.error("模型调用失败：" + ex.getMessage()));
+            }
+            emit(consumer, ChatStreamEvent.done());
+        }
+    }
+
+    public ChatResponse cancelAgentRun(String agentRunId, CancelAgentRunRequest request) {
+        UUID runId = parseUuid(agentRunId);
+        agentRunService.requestCancel(runId);
+        AgentRunContext context = agentRunService.findRun(runId)
+                .map(agentRunService::contextForRun)
+                .orElseThrow();
+        if (agentRunService.isCancelled(runId)) {
+            return new ChatResponse(
+                    context.run().getFinalAnswer(),
+                    request != null && Boolean.TRUE.equals(request.realtimeSearchUsed()),
+                    request == null || request.modelAvailable() == null || request.modelAvailable(),
+                    request == null || !StringUtils.hasText(request.model()) ? context.run().getModel() : request.model(),
+                    request == null || request.sources() == null ? List.of() : request.sources(),
+                    context.run().getConversation().getId(),
+                    context.run().getAssistantMessageId(),
+                    context.run().getId(),
+                    context.steps()
+            );
+        }
+        String partialAnswer = request == null || !StringUtils.hasText(request.partialAnswer())
+                ? (StringUtils.hasText(context.run().getPartialAnswer()) ? context.run().getPartialAnswer() : CANCELLED_ANSWER)
+                : request.partialAnswer();
+        String model = request == null || !StringUtils.hasText(request.model()) ? context.run().getModel() : request.model();
+        boolean realtimeSearchUsed = request != null && Boolean.TRUE.equals(request.realtimeSearchUsed());
+        boolean modelAvailable = request == null || request.modelAvailable() == null || request.modelAvailable();
+        List<SearchResult> sources = request == null || request.sources() == null ? List.of() : request.sources();
+
+        MessageEntity savedMessage = null;
+        if (agentRunService.cancelRun(context.run(), partialAnswer)) {
+            savedMessage = conversationService.saveAssistantMessage(
+                    context.run().getConversation(),
+                    partialAnswer,
+                    model,
+                    realtimeSearchUsed,
+                    modelAvailable,
+                    sources,
+                    "cancelled"
+            );
+            agentRunService.attachAssistantMessage(context, savedMessage);
+        }
+        return new ChatResponse(
+                partialAnswer,
+                realtimeSearchUsed,
+                modelAvailable,
+                model,
+                sources,
+                context.run().getConversation().getId(),
+                savedMessage == null ? context.run().getAssistantMessageId() : savedMessage.getId(),
+                context.run().getId(),
+                context.steps()
+        );
+    }
+
+    private void continueAgentRunAfterToolDecision(ChatRequest request, String selectedModel, ChatStreamConsumer consumer) throws IOException {
+        if (!SUPPORTED_MODELS.containsKey(selectedModel)) {
+            emit(consumer, ChatStreamEvent.error("暂不支持模型 " + selectedModel + "。当前可用模型：" + String.join("、", SUPPORTED_MODELS.keySet()) + "。"));
+            emit(consumer, ChatStreamEvent.done());
+            return;
+        }
+
+        UUID runId = parseUuid(request.agentRunId());
+        AgentRunContext context = agentRunService.findRun(runId)
+                .map(agentRunService::contextForRun)
+                .orElseThrow();
+        ConversationEntity conversation = context.run().getConversation();
+        String message = context.run().getUserGoal();
+        if (context.run().getAssistantMessageId() != null && StringUtils.hasText(context.run().getFinalAnswer())) {
+            emit(consumer, ChatStreamEvent.meta(
+                    selectedModel,
+                    Boolean.TRUE.equals(context.run().getRealtimeSearchUsed()),
+                    context.run().getModelAvailable() == null || context.run().getModelAvailable(),
+                    List.of(),
+                    conversation.getId(),
+                    context.run().getAssistantMessageId(),
+                    context.run().getUserMessageId(),
+                    context.run().getId()
+            ));
+            emitChunkedDelta(consumer, context.run().getFinalAnswer());
+            emit(consumer, ChatStreamEvent.done());
+            return;
+        }
+        boolean approved = "approved".equalsIgnoreCase(request.toolDecision()) || "allow".equalsIgnoreCase(request.toolDecision());
+        boolean denied = "denied".equalsIgnoreCase(request.toolDecision()) || "reject".equalsIgnoreCase(request.toolDecision());
+        if (!approved && !denied) {
+            emit(consumer, ChatStreamEvent.error("未知的工具确认结果：" + request.toolDecision()));
+            emit(consumer, ChatStreamEvent.done());
+            return;
+        }
+
+        Map<String, Object> pendingInput = agentRunService.readPendingToolInput(context.run());
+        agentRunService.markRunning(context);
+        addAgentStep(
+                context,
+                "user_decision",
+                approved ? "用户允许实时检索" : "用户拒绝实时检索",
+                approved ? "用户确认允许 Agent 联网搜索。" : "用户选择不联网，后续回答不能编造实时信息。",
+                "completed",
+                consumer
+        );
+
+        List<SearchResult> sources = new ArrayList<>();
+        if (approved) {
+            String query = String.valueOf(pendingInput.getOrDefault("query", message));
+            emit(consumer, ChatStreamEvent.status("searching", "检索中"));
+            AgentStepResponse searchStep = addAgentStep(context, "action", "调用实时检索", "query=" + query, "completed", consumer);
+            Instant startedAt = Instant.now();
+            sources.addAll(searchSafely(query, 5));
+            emitSourcesMeta(context, true, runModelAvailable(context), sources, consumer);
+            agentRunService.recordToolCall(
+                    context,
+                    searchStep,
+                    "web_search",
+                    Map.of("query", query, "limit", 5),
+                    fallbackSearchSummary(sources),
+                    "completed",
+                    startedAt
+            );
+            addAgentStep(context, "observation", "实时检索结果", fallbackSearchSummary(sources), "completed", consumer);
+        }
+
+        boolean modelConfigured = isModelConfigured();
+        ChatClient chatClient = modelConfigured ? chatClientProvider.getIfAvailable() : null;
+        boolean modelAvailable = modelConfigured && chatClient != null;
+        List<MemoryHit> memories = memoryService.retrieveRelevantMemories(message, conversation.getId());
+        String conversationSummary = conversationService.summaryText(conversation.getId()).orElse("");
+        List<ChatMessage> history = conversationService.recentHistory(conversation.getId(), 16);
+        emit(consumer, ChatStreamEvent.meta(selectedModel, approved, modelAvailable, sources, conversation.getId(), null, context.run().getUserMessageId(), context.run().getId()));
+        emit(consumer, ChatStreamEvent.status("answering", "回答中"));
+        agentRunService.updateProgress(context, "", approved, modelAvailable, sources);
+
+        if (!modelAvailable) {
+            String answer = approved
+                    ? fallbackAnswer(null, sources, false)
+                    : "你已选择不联网检索。当前后端还没有可用模型，因此无法在不联网的情况下生成完整回答。";
+            MessageEntity savedMessage = saveAssistantMessageAndFinalize(conversation, answer, selectedModel, approved, false, sources, context, message);
+            emit(consumer, ChatStreamEvent.meta(selectedModel, approved, false, sources, conversation.getId(), savedMessage.getId(), context.run().getUserMessageId(), context.run().getId()));
+            emitChunkedDelta(consumer, answer);
+            emit(consumer, ChatStreamEvent.done());
+            return;
+        }
+
+        String promptMessage = approved
+                ? message
+                : message + "\n\n用户拒绝了实时检索。请不要编造当前、最新、实时信息；如果问题依赖实时信息，请明确说明无法确认。";
+        StringBuilder streamedAnswer = new StringBuilder();
+        int[] lastSavedLength = {0};
+        long[] lastSavedAt = {System.currentTimeMillis()};
+        try {
+            chatClient.prompt()
+                    .system(SYSTEM_PROMPT)
+                    .options(DashScopeChatOptions.builder()
+                            .model(selectedModel)
+                            .temperature(0.5)
+                            .maxToken(maxTokens)
+                            .build())
+                    .tools(weatherTools)
+                    .user(buildUserPrompt(promptMessage, conversationSummary, history, sources, null, memories, "", selectedModel))
+                    .stream()
+                    .chatResponse()
+                    .map(this::extractStreamContent)
+                    .filter(StringUtils::hasText)
+                    .doOnNext(content -> {
+                        if (agentRunService.shouldStop(context.run().getId())) {
+                            throw new AgentRunCancelledException();
+                        }
+                        streamedAnswer.append(content);
+                        persistPartialIfNeeded(context, streamedAnswer, approved, modelAvailable, sources, lastSavedLength, lastSavedAt);
+                        try {
+                            consumer.accept(ChatStreamEvent.delta(content));
+                        } catch (IOException ex) {
+                            throw new UncheckedIOException(ex);
+                        }
+                    })
+                    .blockLast();
+
+            if (agentRunService.shouldStop(context.run().getId())) {
+                saveCancelledPartial(conversation, streamedAnswer.toString(), selectedModel, approved, modelAvailable, sources, context, message);
+                return;
+            }
+            agentRunService.updateProgress(context, streamedAnswer.toString(), approved, true, sources);
+
+            String answer = StringUtils.hasText(streamedAnswer.toString())
+                    ? streamedAnswer.toString()
+                    : fallbackAnswer(null, sources, true);
+            answer = applyReflectionIfNeeded(answer, message, new PreparedAgentContext(context, context.mode(), approved, null, sources, memories, ""), chatClient, selectedModel, true, consumer);
+            agentRunService.updateProgress(context, answer, approved, true, sources);
+            MessageEntity savedMessage = saveAssistantMessageAndFinalize(conversation, answer, selectedModel, approved, true, sources, context, message);
+            emit(consumer, ChatStreamEvent.meta(selectedModel, approved, true, sources, conversation.getId(), savedMessage.getId(), context.run().getUserMessageId(), context.run().getId()));
+            emit(consumer, ChatStreamEvent.done());
+        } catch (AgentRunCancelledException ex) {
+            saveCancelledPartial(conversation, streamedAnswer.toString(), selectedModel, approved, modelAvailable, sources, context, message);
+        } catch (UncheckedIOException ex) {
+            saveCancelledPartial(conversation, streamedAnswer.toString(), selectedModel, approved, modelAvailable, sources, context, message);
+            throw ex.getCause();
+        } catch (RuntimeException ex) {
+            String fallback = approved ? fallbackAnswer(null, sources, true) : "";
+            String partial = streamedAnswer.toString();
+            String answer = StringUtils.hasText(partial) ? partial : fallback;
+            if (StringUtils.hasText(answer)) {
+                addAgentStep(
+                        context,
+                        "warning",
+                        "模型调用中断，返回降级结果",
+                        "模型流式调用中断：" + ex.getMessage() + "。已使用已有回答或检索结果完成本次回复。",
+                        "degraded",
+                        consumer
+                );
+                MessageEntity savedMessage = saveAssistantMessageAndFinalize(conversation, answer, selectedModel, approved, false, sources, context, message);
+                emit(consumer, ChatStreamEvent.meta(selectedModel, approved, false, sources, conversation.getId(), savedMessage.getId(), context.run().getUserMessageId(), context.run().getId()));
+                if (!StringUtils.hasText(partial)) {
+                    emitChunkedDelta(consumer, answer);
+                }
+            } else {
+                addAgentStep(context, "error", "模型调用失败", ex.getMessage(), "failed", consumer);
+                agentRunService.failRun(context, "模型调用失败：" + ex.getMessage(), partial);
+                emit(consumer, ChatStreamEvent.error("模型调用失败：" + ex.getMessage()));
             }
             emit(consumer, ChatStreamEvent.done());
         }
@@ -439,15 +751,19 @@ public class ChatService {
                                                      Boolean requestedSearch,
                                                      String selectedModel,
                                                      List<ChatMessage> history,
+                                                     String conversationSummary,
                                                      ChatClient chatClient,
                                                      boolean modelAvailable,
                                                      ChatStreamConsumer consumer) throws IOException {
-        boolean weatherIntent = shouldUseWeatherTool(message);
-        boolean useSearch = shouldUseSearch(message, requestedSearch) || weatherIntent;
+        WeatherPlan weatherPlan = weatherQueryPlanner.plan(message, history, conversationSummary);
+        boolean weatherIntent = shouldUseWeatherTool(message) || weatherPlan.weatherIntent();
+        SearchDecision searchDecision = decideSearchNeed(message, history, chatClient, selectedModel);
+        boolean useSearch = Boolean.TRUE.equals(requestedSearch) || weatherIntent || searchDecision.needsSearch();
         AgentMode mode = selectAgentMode(message, weatherIntent, useSearch);
         AgentRunContext runContext = agentRunService.startRun(conversation, userMessage, mode, message, selectedModel);
+        agentRunService.updateProgress(runContext, "", useSearch, modelAvailable, List.of());
         if (consumer != null) {
-            emit(consumer, ChatStreamEvent.meta(selectedModel, useSearch, modelAvailable, List.of(), conversation.getId(), null, runContext.run().getId()));
+            emit(consumer, ChatStreamEvent.meta(selectedModel, useSearch, modelAvailable, List.of(), conversation.getId(), null, userMessage.getId(), runContext.run().getId()));
         }
 
         addAgentStep(
@@ -495,7 +811,7 @@ public class ChatService {
             if (consumer != null) {
                 emit(consumer, ChatStreamEvent.status("acting", "调用工具中"));
             }
-            weatherReport = runReactToolLoop(runContext, message, requestedSearch, weatherIntent, useSearch, sources, consumer);
+            weatherReport = runReactToolLoop(runContext, message, requestedSearch, weatherIntent, weatherPlan, useSearch, searchDecision, sources, consumer);
         } else if (useSearch) {
             if (consumer != null) {
                 emit(consumer, ChatStreamEvent.status("searching", "检索中"));
@@ -504,6 +820,7 @@ public class ChatService {
             Instant startedAt = Instant.now();
             List<SearchResult> searchResults = searchSafely(message, 5);
             sources.addAll(searchResults);
+            emitSourcesMeta(runContext, true, modelAvailable, sources, consumer);
             agentRunService.recordToolCall(
                     runContext,
                     searchStep,
@@ -520,27 +837,150 @@ public class ChatService {
             addAgentStep(runContext, "plan", "直接回答", "问题不需要拆解或调用工具，直接结合会话上下文回答。", "completed", consumer);
         }
 
+        List<SearchResult> finalSources = deduplicateSources(sources);
+        agentRunService.updateProgress(runContext, null, useSearch, modelAvailable, finalSources);
         return new PreparedAgentContext(
                 runContext,
                 mode,
                 useSearch,
                 weatherReport,
-                deduplicateSources(sources),
+                finalSources,
                 memories,
                 plan
         );
+    }
+
+    private SearchDecision decideSearchNeed(String message,
+                                            List<ChatMessage> history,
+                                            ChatClient chatClient,
+                                            String selectedModel) {
+        boolean keywordDecision = shouldUseSearch(message, false);
+        if (chatClient != null) {
+            try {
+                String decision = chatClient.prompt()
+                        .system("""
+                                Decide whether a desktop assistant needs real-time web search before answering.
+                                Return one short line in this exact format:
+                                SEARCH: yes/no | REASON: Chinese reason | QUERY: suggested search query
+                                Say yes for current weather fallback, breaking news, current prices, latest versions, schedules, laws/policies, sports scores, exchange rates, or anything likely changed recently.
+                                Say no for stable knowledge, coding explanation, writing, summarization, or local file operations.
+                                """)
+                        .options(DashScopeChatOptions.builder()
+                                .model(selectedModel)
+                                .temperature(0.1)
+                                .maxToken(240)
+                                .build())
+                        .user(buildSearchDecisionPrompt(message, history))
+                        .call()
+                        .content();
+                SearchDecision parsed = parseSearchDecision(decision, message);
+                if (parsed != null) {
+                    return parsed;
+                }
+            } catch (RuntimeException ignored) {
+                // Fall back to deterministic keyword detection.
+            }
+        }
+
+        return new SearchDecision(
+                keywordDecision,
+                keywordDecision ? "问题包含实时、最新、天气、价格、新闻等可能变化的信息。" : "问题更像稳定知识或普通对话，不需要实时检索。",
+                message
+        );
+    }
+
+    private String buildSearchDecisionPrompt(String message, List<ChatMessage> history) {
+        StringBuilder prompt = new StringBuilder();
+        prompt.append("Current date: ")
+                .append(LocalDate.now(APP_ZONE))
+                .append(" (Asia/Shanghai)\n\n");
+        if (history != null && !history.isEmpty()) {
+            prompt.append("Recent conversation:\n");
+            history.stream()
+                    .skip(Math.max(0, history.size() - 4))
+                    .forEach(item -> prompt.append("- ")
+                            .append(item.role())
+                            .append(": ")
+                            .append(trimForPrompt(item.content(), 220))
+                            .append('\n'));
+            prompt.append('\n');
+        }
+        prompt.append("User question:\n").append(message);
+        return prompt.toString();
+    }
+
+    private SearchDecision parseSearchDecision(String decision, String fallbackQuery) {
+        if (!StringUtils.hasText(decision)) {
+            return null;
+        }
+
+        String lower = decision.toLowerCase(Locale.ROOT);
+        boolean needsSearch;
+        if (lower.contains("search: yes") || lower.contains("search：yes") || lower.contains("需要") || lower.contains("yes")) {
+            needsSearch = true;
+        } else if (lower.contains("search: no") || lower.contains("search：no") || lower.contains("不需要") || lower.contains("no")) {
+            needsSearch = false;
+        } else {
+            return null;
+        }
+
+        String reason = extractDecisionField(decision, "REASON");
+        String query = extractDecisionField(decision, "QUERY");
+        return new SearchDecision(
+                needsSearch,
+                StringUtils.hasText(reason) ? reason : (needsSearch ? "Agent 判断需要实时信息。" : "Agent 判断不需要实时信息。"),
+                StringUtils.hasText(query) ? query : fallbackQuery
+        );
+    }
+
+    private String extractDecisionField(String decision, String field) {
+        Pattern pattern = Pattern.compile(field + "\\s*[:：]\\s*([^|\\n]+)", Pattern.CASE_INSENSITIVE);
+        Matcher matcher = pattern.matcher(decision);
+        if (matcher.find()) {
+            return matcher.group(1).trim();
+        }
+        return "";
+    }
+
+    private void requestSearchConfirmation(AgentRunContext runContext,
+                                           SearchDecision searchDecision,
+                                           ChatStreamConsumer consumer) throws IOException {
+        AgentStepResponse step = addAgentStep(
+                runContext,
+                "tool_confirmation",
+                "等待实时检索确认",
+                searchDecision.reason(),
+                "waiting",
+                consumer
+        );
+        Map<String, String> input = Map.of(
+                "query", StringUtils.hasText(searchDecision.query()) ? searchDecision.query() : runContext.run().getUserGoal(),
+                "reason", searchDecision.reason()
+        );
+        agentRunService.markWaitingForTool(runContext, "web_search", input);
+        agentRunService.recordToolCall(runContext, step, "web_search", input, "等待用户确认", "waiting", Instant.now());
+        emit(consumer, ChatStreamEvent.status("waiting_confirmation", "等待确认"));
+        emit(consumer, ChatStreamEvent.toolConfirmationRequired(
+                runContext.run().getId(),
+                "web_search",
+                input.get("query"),
+                searchDecision.reason()
+        ));
     }
 
     private WeatherReport runReactToolLoop(AgentRunContext runContext,
                                            String message,
                                            Boolean requestedSearch,
                                            boolean weatherIntent,
+                                           WeatherPlan weatherPlan,
                                            boolean useSearch,
+                                           SearchDecision searchDecision,
                                            List<SearchResult> sources,
                                            ChatStreamConsumer consumer) throws IOException {
         int actionSteps = 0;
         int maxSteps = runContext.run().getMaxSteps();
         WeatherReport weatherReport = null;
+        WeatherPlan resolvedWeatherPlan = weatherPlan == null ? WeatherPlan.empty() : weatherPlan;
 
         addAgentStep(
                 runContext,
@@ -551,47 +991,82 @@ public class ChatService {
                 consumer
         );
 
-        if (weatherIntent && actionSteps < maxSteps) {
+        if (weatherIntent) {
+            addAgentStep(
+                    runContext,
+                    "thought",
+                    "解析天气查询",
+                    resolvedWeatherPlan.stepSummary(),
+                    resolvedWeatherPlan.needsClarification() ? "waiting" : "completed",
+                    consumer
+            );
+            if (resolvedWeatherPlan.needsClarification()) {
+                return WeatherReport.unavailable("", resolvedWeatherPlan.clarificationQuestion(), List.of());
+            }
+        }
+
+        if (weatherIntent && !resolvedWeatherPlan.queries().isEmpty() && actionSteps < maxSteps) {
             actionSteps++;
-            String weatherLocation = extractWeatherLocation(message);
-            String weatherDate = extractWeatherDate(message);
             AgentStepResponse weatherStep = addAgentStep(
                     runContext,
                     "action",
-                    "调用天气工具",
-                    "get_weather(location=%s, date=%s)".formatted(weatherLocation, weatherDate),
+                    "批量调用天气工具",
+                    resolvedWeatherPlan.queries().stream()
+                            .map(WeatherQuery::callText)
+                            .reduce((left, right) -> left + "\n" + right)
+                            .orElse("没有可执行的天气查询。"),
                     "completed",
                     consumer
             );
-            Instant startedAt = Instant.now();
-            weatherReport = weatherTools.getWeatherReport(weatherLocation, weatherDate);
-            sources.addAll(weatherReport.sources());
-            agentRunService.recordToolCall(
-                    runContext,
-                    weatherStep,
-                    "get_weather",
-                    Map.of("location", weatherLocation, "date", weatherDate),
-                    weatherReport.context(),
-                    weatherReport.available() ? "completed" : "failed",
-                    startedAt
-            );
+            List<WeatherQueryResult> results = new ArrayList<>();
+            for (WeatherQuery query : resolvedWeatherPlan.queries()) {
+                Instant startedAt = Instant.now();
+                WeatherReport report = weatherTools.getWeatherReport(query.resolvedLocation(), query.targetDate());
+                String status = weatherToolStatus(report);
+                sources.addAll(report.sources());
+                results.add(new WeatherQueryResult(query, report, status));
+                agentRunService.recordToolCall(
+                        runContext,
+                        weatherStep,
+                        "get_weather",
+                        Map.of(
+                                "location", query.resolvedLocation(),
+                                "date", query.targetDate(),
+                                "source", query.source(),
+                                "locationText", query.locationText()
+                        ),
+                        report.context(),
+                        status,
+                        startedAt
+                );
+                if ("cancelled".equals(status)) {
+                    break;
+                }
+            }
+            weatherReport = aggregateWeatherReports(resolvedWeatherPlan, results);
             addAgentStep(
                     runContext,
                     "observation",
                     "天气工具结果",
                     StringUtils.hasText(weatherReport.context()) ? weatherReport.context() : weatherReport.summary(),
-                    weatherReport.available() ? "completed" : "failed",
+                    weatherReport.available() ? "completed" : weatherToolStatus(weatherReport),
                     consumer
             );
         }
 
-        boolean shouldRunSearch = useSearch && (!weatherIntent || Boolean.TRUE.equals(requestedSearch));
+        boolean manualSearchRequested = Boolean.TRUE.equals(requestedSearch);
+        boolean shouldRunSearch = manualSearchRequested || (searchDecision.needsSearch() && !weatherIntent);
         if (shouldRunSearch && actionSteps < maxSteps) {
+            if (!manualSearchRequested && consumer != null) {
+                requestSearchConfirmation(runContext, searchDecision, consumer);
+                return weatherReport;
+            }
             actionSteps++;
             AgentStepResponse searchStep = addAgentStep(runContext, "action", "调用实时检索", "query=" + message, "completed", consumer);
             Instant startedAt = Instant.now();
             List<SearchResult> searchResults = searchSafely(message, 5);
             sources.addAll(searchResults);
+            emitSourcesMeta(runContext, true, runModelAvailable(runContext), sources, consumer);
             agentRunService.recordToolCall(
                     runContext,
                     searchStep,
@@ -604,7 +1079,13 @@ public class ChatService {
             addAgentStep(runContext, "observation", "实时检索结果", fallbackSearchSummary(searchResults), "completed", consumer);
         }
 
-        if (shouldSearchWeatherFallback(weatherIntent, extractWeatherLocation(message), weatherReport) && actionSteps < maxSteps) {
+        if (shouldSearchWeatherFallback(weatherIntent, resolvedWeatherPlan, weatherReport) && actionSteps < maxSteps) {
+            String fallbackQuery = weatherFallbackQuery(resolvedWeatherPlan, message);
+            if (!Boolean.TRUE.equals(requestedSearch) && consumer != null) {
+                SearchDecision fallbackDecision = new SearchDecision(true, "天气服务不可用，需要联网检索天气信息。", fallbackQuery);
+                requestSearchConfirmation(runContext, fallbackDecision, consumer);
+                return weatherReport;
+            }
             actionSteps++;
             AgentStepResponse fallbackStep = addAgentStep(
                     runContext,
@@ -615,13 +1096,14 @@ public class ChatService {
                     consumer
             );
             Instant startedAt = Instant.now();
-            List<SearchResult> fallbackResults = searchSafely(message, 5);
+            List<SearchResult> fallbackResults = searchSafely(fallbackQuery, 5);
             sources.addAll(fallbackResults);
+            emitSourcesMeta(runContext, true, runModelAvailable(runContext), sources, consumer);
             agentRunService.recordToolCall(
                     runContext,
                     fallbackStep,
                     "web_search",
-                    Map.of("query", message, "reason", "weather_fallback", "limit", 5),
+                    Map.of("query", fallbackQuery, "reason", "weather_fallback", "limit", 5),
                     fallbackSearchSummary(fallbackResults),
                     "completed",
                     startedAt
@@ -794,7 +1276,7 @@ public class ChatService {
             currentAnswer += supplement;
             if (streaming && consumer != null) {
                 emitUnchecked(consumer, ChatStreamEvent.status("answering", "回答中"));
-                emitUnchecked(consumer, ChatStreamEvent.delta(supplement));
+                emitChunkedDeltaUnchecked(consumer, supplement);
             }
         }
 
@@ -908,6 +1390,67 @@ public class ChatService {
         return new ArrayList<>(deduplicated.values());
     }
 
+    private void persistPartialIfNeeded(AgentRunContext runContext,
+                                        StringBuilder streamedAnswer,
+                                        boolean realtimeSearchUsed,
+                                        boolean modelAvailable,
+                                        List<SearchResult> sources,
+                                        int[] lastSavedLength,
+                                        long[] lastSavedAt) {
+        if (runContext == null || streamedAnswer == null || streamedAnswer.isEmpty()) {
+            return;
+        }
+
+        long now = System.currentTimeMillis();
+        int length = streamedAnswer.length();
+        boolean enoughText = length - lastSavedLength[0] >= PARTIAL_SAVE_CHAR_INTERVAL;
+        boolean enoughTime = now - lastSavedAt[0] >= PARTIAL_SAVE_MILLIS;
+        if (!enoughText && !enoughTime) {
+            return;
+        }
+
+        agentRunService.updateProgress(runContext, streamedAnswer.toString(), realtimeSearchUsed, modelAvailable, sources);
+        lastSavedLength[0] = length;
+        lastSavedAt[0] = now;
+    }
+
+    private void saveCancelledPartial(ConversationEntity conversation,
+                                      String partialAnswer,
+                                      String model,
+                                      boolean realtimeSearchUsed,
+                                      boolean modelAvailable,
+                                      List<SearchResult> sources,
+                                      AgentRunContext runContext,
+                                      String userMessage) {
+        if (agentRunService.isCancelled(runContext.run().getId())) {
+            return;
+        }
+        String content = StringUtils.hasText(partialAnswer) ? partialAnswer : CANCELLED_ANSWER;
+        if (!agentRunService.cancelRun(runContext.run(), content)) {
+            return;
+        }
+        MessageEntity savedMessage = conversationService.saveAssistantMessage(
+                conversation,
+                content,
+                model,
+                realtimeSearchUsed,
+                modelAvailable,
+                sources,
+                "cancelled"
+        );
+        agentRunService.attachAssistantMessage(runContext, savedMessage);
+    }
+
+    private UUID parseUuid(String value) {
+        if (!StringUtils.hasText(value)) {
+            throw new IllegalArgumentException("缺少 UUID。");
+        }
+        return UUID.fromString(value.trim());
+    }
+
+    private static class AgentRunCancelledException extends RuntimeException {
+    }
+
     private String extractStreamContent(org.springframework.ai.chat.model.ChatResponse response) {
         if (response == null || response.getResults() == null || response.getResults().isEmpty()) {
             return "";
@@ -932,6 +1475,54 @@ public class ChatService {
         consumer.accept(event);
     }
 
+    private void emitChunkedDelta(ChatStreamConsumer consumer, String content) throws IOException {
+        if (consumer == null || !StringUtils.hasText(content)) {
+            return;
+        }
+
+        int chunkSize = 12;
+        for (int index = 0; index < content.length(); index += chunkSize) {
+            emit(consumer, ChatStreamEvent.delta(content.substring(index, Math.min(content.length(), index + chunkSize))));
+        }
+    }
+
+    private void emitChunkedDeltaUnchecked(ChatStreamConsumer consumer, String content) {
+        try {
+            emitChunkedDelta(consumer, content);
+        } catch (IOException ex) {
+            throw new UncheckedIOException(ex);
+        }
+    }
+
+    private void emitSourcesMeta(AgentRunContext runContext,
+                                 boolean realtimeSearchUsed,
+                                 boolean modelAvailable,
+                                 List<SearchResult> sources,
+                                 ChatStreamConsumer consumer) throws IOException {
+        if (runContext == null || consumer == null || sources == null || sources.isEmpty()) {
+            return;
+        }
+
+        List<SearchResult> deduplicatedSources = deduplicateSources(sources);
+        agentRunService.updateProgress(runContext, null, realtimeSearchUsed, modelAvailable, deduplicatedSources);
+        emit(consumer, ChatStreamEvent.meta(
+                runContext.run().getModel(),
+                realtimeSearchUsed,
+                modelAvailable,
+                deduplicatedSources,
+                runContext.run().getConversation().getId(),
+                null,
+                runContext.run().getUserMessageId(),
+                runContext.run().getId()
+        ));
+    }
+
+    private boolean runModelAvailable(AgentRunContext runContext) {
+        return runContext == null
+                || runContext.run().getModelAvailable() == null
+                || runContext.run().getModelAvailable();
+    }
+
     private ChatResponse persistChatResponse(ConversationEntity conversation,
                                              String answer,
                                              boolean realtimeSearchUsed,
@@ -950,8 +1541,9 @@ public class ChatService {
                 runContext,
                 userMessage
         );
+        String savedAnswer = savedMessage.getContent();
         return new ChatResponse(
-                answer,
+                savedAnswer,
                 realtimeSearchUsed,
                 modelAvailable,
                 model,
@@ -971,9 +1563,10 @@ public class ChatService {
                                                           List<SearchResult> sources,
                                                           AgentRunContext runContext,
                                                           String userMessage) {
+        String finalAnswer = normalizeFinalAnswer(answer, sources);
         MessageEntity savedMessage = conversationService.saveAssistantMessage(
                 conversation,
-                answer,
+                finalAnswer,
                 model,
                 realtimeSearchUsed,
                 modelAvailable,
@@ -984,14 +1577,25 @@ public class ChatService {
                 conversation.getId(),
                 savedMessage.getId(),
                 userMessage,
-                answer,
+                finalAnswer,
                 model,
                 sources == null ? 0 : sources.size()
         );
         if (runContext != null) {
-            agentRunService.completeRun(runContext, savedMessage, answer);
+            agentRunService.completeRun(runContext, savedMessage, finalAnswer);
         }
         return savedMessage;
+    }
+
+    private String normalizeFinalAnswer(String answer, List<SearchResult> sources) {
+        if (StringUtils.hasText(answer)) {
+            return answer;
+        }
+        if (sources != null && !sources.isEmpty()) {
+            return "没有收到模型正文，以下是本次检索到的参考信息。\n\n" + fallbackSearchSummary(sources);
+        }
+
+        return "没有收到模型返回内容。";
     }
 
     private void refreshConversationSummaryIfNeeded(ConversationEntity conversation, String selectedModel) {
@@ -1219,11 +1823,180 @@ public class ChatService {
                 || normalized.contains("temperature");
     }
 
-    private boolean shouldSearchWeatherFallback(boolean weatherIntent, String weatherLocation, WeatherReport weatherReport) {
+    private WeatherReport aggregateWeatherReports(WeatherPlan weatherPlan, List<WeatherQueryResult> results) {
+        if (results == null || results.isEmpty()) {
+            return WeatherReport.unavailable("", "没有生成可执行的天气查询。", List.of());
+        }
+
+        boolean anyAvailable = results.stream().anyMatch(result -> result.report() != null && result.report().available());
+        StringBuilder summary = new StringBuilder("天气查询结果：");
+        StringBuilder context = new StringBuilder("Weather query plan:\n")
+                .append(weatherPlan.stepSummary())
+                .append("\n\nWeather tool results:\n");
+        List<SearchResult> reportSources = new ArrayList<>();
+
+        for (WeatherQueryResult result : results) {
+            WeatherQuery query = result.query();
+            WeatherReport report = result.report();
+            String reportSummary = report == null ? "天气工具没有返回结果。" : compactLine(report.summary());
+            summary.append('\n')
+                    .append("- ")
+                    .append(query.displayText())
+                    .append("：")
+                    .append(reportSummary);
+            context.append("\nQuery: ")
+                    .append(query.callText())
+                    .append("\nStatus: ")
+                    .append(result.status())
+                    .append("\nSource: ")
+                    .append(query.source())
+                    .append("\n")
+                    .append(report == null ? "No weather result." : report.context())
+                    .append('\n');
+            if (report != null && report.sources() != null) {
+                reportSources.addAll(report.sources());
+            }
+        }
+
+        return new WeatherReport(
+                anyAvailable,
+                weatherPlan.queries().stream().map(WeatherQuery::resolvedLocation).distinct().reduce((left, right) -> left + "、" + right).orElse(""),
+                summary.toString(),
+                context.toString(),
+                deduplicateSources(reportSources)
+        );
+    }
+
+    private String weatherToolStatus(WeatherReport weatherReport) {
+        if (weatherReport == null) {
+            return "unavailable";
+        }
+        String text = ((weatherReport.summary() == null ? "" : weatherReport.summary())
+                + "\n"
+                + (weatherReport.context() == null ? "" : weatherReport.context())).toLowerCase(Locale.ROOT);
+        if (text.contains("已中断") || text.contains("interrupted")) {
+            return "cancelled";
+        }
+        return weatherReport.available() ? "completed" : "unavailable";
+    }
+
+    private boolean shouldSearchWeatherFallback(boolean weatherIntent, WeatherPlan weatherPlan, WeatherReport weatherReport) {
         return weatherIntent
-                && StringUtils.hasText(weatherLocation)
+                && weatherPlan != null
+                && !weatherPlan.needsClarification()
+                && !weatherPlan.queries().isEmpty()
                 && weatherReport != null
-                && !weatherReport.available();
+                && (!weatherReport.available() || hasUnavailableWeatherResult(weatherReport));
+    }
+
+    private boolean hasUnavailableWeatherResult(WeatherReport weatherReport) {
+        return weatherReport != null
+                && StringUtils.hasText(weatherReport.context())
+                && weatherReport.context().contains("Status: unavailable");
+    }
+
+    private String weatherFallbackQuery(WeatherPlan weatherPlan, String fallbackMessage) {
+        if (weatherPlan == null || weatherPlan.queries().isEmpty()) {
+            return fallbackMessage;
+        }
+        String locations = weatherPlan.queries().stream()
+                .map(WeatherQuery::resolvedLocation)
+                .distinct()
+                .reduce((left, right) -> left + " " + right)
+                .orElse("");
+        String dates = weatherPlan.queries().stream()
+                .map(WeatherQuery::targetDate)
+                .distinct()
+                .reduce((left, right) -> left + " " + right)
+                .orElse("");
+        return (locations + " " + dates + " 天气 预报").trim();
+    }
+
+    private String completeIncompleteAnswerIfNeeded(String answer,
+                                                    String message,
+                                                    PreparedAgentContext agentContext,
+                                                    boolean streaming,
+                                                    ChatStreamConsumer consumer) {
+        if (!looksIncompleteWeatherAnswer(answer, agentContext)) {
+            return answer;
+        }
+
+        String supplement = buildWeatherCompletionSupplement(message, agentContext);
+        if (!StringUtils.hasText(supplement)) {
+            return answer;
+        }
+
+        String finalAnswer = (StringUtils.hasText(answer) ? answer.trim() + "\n\n" : "") + supplement;
+        addAgentStep(
+                agentContext.runContext(),
+                "final",
+                "回答兜底补全",
+                "模型返回内容疑似停留在开场白，已基于天气工具结果补全最终回答。",
+                "completed",
+                consumer
+        );
+        if (streaming && consumer != null) {
+            emitUnchecked(consumer, ChatStreamEvent.status("answering", "回答中"));
+            emitChunkedDeltaUnchecked(consumer, "\n\n" + supplement);
+        }
+        return finalAnswer;
+    }
+
+    private boolean looksIncompleteWeatherAnswer(String answer, PreparedAgentContext agentContext) {
+        if (agentContext == null || agentContext.weatherReport() == null || !StringUtils.hasText(agentContext.weatherReport().summary())) {
+            return false;
+        }
+        String trimmed = answer == null ? "" : answer.trim();
+        if (!StringUtils.hasText(trimmed)) {
+            return true;
+        }
+        boolean openerOnly = trimmed.length() < 120
+                && (trimmed.contains("我帮你查")
+                || trimmed.contains("我来查")
+                || trimmed.contains("帮你查询")
+                || trimmed.contains("好的")
+                || trimmed.contains("我会帮你"));
+        boolean ignoredWeatherEvidence = agentContext.weatherReport().summary().contains("°C")
+                && !trimmed.contains("°C")
+                && trimmed.length() < 180;
+        return openerOnly || ignoredWeatherEvidence;
+    }
+
+    private String buildWeatherCompletionSupplement(String message, PreparedAgentContext agentContext) {
+        WeatherReport weatherReport = agentContext.weatherReport();
+        if (weatherReport == null || !StringUtils.hasText(weatherReport.summary())) {
+            return "";
+        }
+
+        StringBuilder supplement = new StringBuilder("基于已完成的天气工具结果，补充如下：\n\n")
+                .append(weatherReport.summary());
+        if (isTravelWeatherQuestion(message)) {
+            supplement.append("\n\n行程细化建议：")
+                    .append("\n- 优先把室内或遮蔽性较好的点安排在高温、降雨或午后时段。")
+                    .append("\n- 户外拍照、步行和夜游项目建议避开明显降雨时段，并预留交通缓冲。")
+                    .append("\n- 如果多个景点所在区域天气接近，可以按原路线推进；如果某一区域降雨更明显，优先把该区域改为室内备选。");
+        }
+        return supplement.toString();
+    }
+
+    private boolean isTravelWeatherQuestion(String message) {
+        if (!StringUtils.hasText(message)) {
+            return false;
+        }
+        return message.contains("景点")
+                || message.contains("行程")
+                || message.contains("路线")
+                || message.contains("旅游")
+                || message.contains("游玩")
+                || message.contains("安排")
+                || message.contains("细化");
+    }
+
+    private String compactLine(String value) {
+        if (!StringUtils.hasText(value)) {
+            return "";
+        }
+        return value.replaceAll("\\s+", " ").trim();
     }
 
     private List<SearchResult> searchSafely(String query, int limit) {
@@ -1379,6 +2152,7 @@ public class ChatService {
             prompt.append("Tool context:\n")
                     .append(weatherReport.context())
                     .append('\n');
+            prompt.append("If the weather context contains multiple query results, cover every location/date result instead of only saying you will check it.\n");
             if (!weatherReport.available() && !sources.isEmpty()) {
                 prompt.append("Weather tool status: unavailable. Use the search context as fallback if it contains relevant weather information, and explain that the direct weather service was unavailable.\n\n");
             }

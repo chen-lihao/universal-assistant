@@ -78,6 +78,11 @@ public class WeatherService {
         } catch (IOException | InterruptedException | IllegalArgumentException ex) {
             if (ex instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
+                return WeatherReport.unavailable(
+                        location,
+                        "天气查询已中断。",
+                        List.of(geocodingSource(location))
+                );
             }
             return WeatherReport.unavailable(
                     location,

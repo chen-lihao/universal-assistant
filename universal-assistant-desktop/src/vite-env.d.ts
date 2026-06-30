@@ -31,6 +31,7 @@ type PetAction = 'wave' | 'jump' | 'fireworks' | 'run' | 'sleep' | 'idle'
 interface Window {
   assistant?: {
     toggleChat: () => Promise<void>
+    showChat: () => Promise<void>
     hideChat: () => Promise<void>
     getBackendUrl: () => Promise<string>
     setPetState: (state: PetState) => Promise<void>

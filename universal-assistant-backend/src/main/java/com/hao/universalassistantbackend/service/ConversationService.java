@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hao.universalassistantbackend.entity.ConversationEntity;
 import com.hao.universalassistantbackend.entity.MessageEntity;
 import com.hao.universalassistantbackend.entity.ConversationSummaryEntity;
+import com.hao.universalassistantbackend.model.AgentRunContext;
 import com.hao.universalassistantbackend.model.ChatMessage;
 import com.hao.universalassistantbackend.model.ConversationMessageResponse;
 import com.hao.universalassistantbackend.model.ConversationMessagesResponse;
@@ -17,9 +18,11 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -31,18 +34,27 @@ public class ConversationService {
     private static final TypeReference<List<SearchResult>> SEARCH_RESULT_LIST = new TypeReference<>() {
     };
 
+    private record DisplayMessage(Instant createdAt, ConversationMessageResponse response) {
+    }
+
     private final ConversationRepository conversationRepository;
     private final MessageRepository messageRepository;
     private final ConversationSummaryRepository conversationSummaryRepository;
+    private final AgentRunService agentRunService;
+    private final MemoryService memoryService;
     private final ObjectMapper objectMapper;
 
     public ConversationService(ConversationRepository conversationRepository,
                                MessageRepository messageRepository,
                                ConversationSummaryRepository conversationSummaryRepository,
+                               AgentRunService agentRunService,
+                               MemoryService memoryService,
                                ObjectMapper objectMapper) {
         this.conversationRepository = conversationRepository;
         this.messageRepository = messageRepository;
         this.conversationSummaryRepository = conversationSummaryRepository;
+        this.agentRunService = agentRunService;
+        this.memoryService = memoryService;
         this.objectMapper = objectMapper;
     }
 
@@ -62,12 +74,46 @@ public class ConversationService {
         return toConversationResponse(conversationRepository.save(conversation));
     }
 
+    @Transactional
+    public ConversationResponse renameConversation(String conversationId, String title) {
+        UUID id = parseConversationId(conversationId).orElseThrow();
+        ConversationEntity conversation = conversationRepository.findById(id).orElseThrow();
+        conversation.setTitle(StringUtils.hasText(title) ? title.trim() : DEFAULT_TITLE);
+        conversation.touch();
+        return toConversationResponse(conversationRepository.save(conversation));
+    }
+
+    @Transactional
+    public ConversationResponse archiveConversation(String conversationId) {
+        UUID id = parseConversationId(conversationId).orElseThrow();
+        ConversationEntity conversation = conversationRepository.findById(id).orElseThrow();
+        conversation.setArchived(true);
+        conversation.touch();
+        return toConversationResponse(conversationRepository.save(conversation));
+    }
+
     @Transactional(readOnly = true)
     public ConversationMessagesResponse getMessages(String conversationId) {
         UUID id = parseConversationId(conversationId).orElseThrow();
-        List<ConversationMessageResponse> messages = messageRepository.findByConversation_IdOrderByCreatedAtAsc(id)
-                .stream()
-                .map(this::toMessageResponse)
+        List<MessageEntity> activeMessages = messageRepository.findByConversation_IdAndInvalidatedAtIsNullOrderByCreatedAtAsc(id);
+        List<UUID> assistantMessageIds = activeMessages.stream()
+                .filter(message -> "assistant".equals(message.getRole()))
+                .map(MessageEntity::getId)
+                .toList();
+        Map<UUID, AgentRunContext> contexts = agentRunService.contextsByAssistantMessageIds(assistantMessageIds);
+        List<DisplayMessage> displayMessages = new ArrayList<>();
+        activeMessages.stream()
+                .filter(message -> !isLegacyEmptyAssistantPlaceholder(message, contexts.get(message.getId())))
+                .map(message -> new DisplayMessage(message.getCreatedAt(), toMessageResponse(message, contexts.get(message.getId()))))
+                .forEach(displayMessages::add);
+
+        agentRunService.unresolvedContexts(id).stream()
+                .map(context -> new DisplayMessage(context.run().getCreatedAt(), toRunMessageResponse(context)))
+                .forEach(displayMessages::add);
+
+        List<ConversationMessageResponse> messages = displayMessages.stream()
+                .sorted((left, right) -> left.createdAt().compareTo(right.createdAt()))
+                .map(DisplayMessage::response)
                 .toList();
         return new ConversationMessagesResponse(id, messages);
     }
@@ -90,7 +136,19 @@ public class ConversationService {
 
     @Transactional(readOnly = true)
     public List<ChatMessage> recentHistory(UUID conversationId, int limit) {
-        List<MessageEntity> newest = messageRepository.findTop20ByConversation_IdOrderByCreatedAtDesc(conversationId);
+        List<MessageEntity> newest = messageRepository.findTop20ByConversation_IdAndInvalidatedAtIsNullOrderByCreatedAtDesc(conversationId);
+        Collections.reverse(newest);
+
+        int fromIndex = Math.max(0, newest.size() - Math.max(1, limit));
+        return newest.subList(fromIndex, newest.size())
+                .stream()
+                .map(message -> new ChatMessage(message.getRole(), message.getContent()))
+                .toList();
+    }
+
+    @Transactional(readOnly = true)
+    public List<ChatMessage> recentHistoryBefore(UUID conversationId, Instant createdAt, int limit) {
+        List<MessageEntity> newest = messageRepository.findTop20ByConversation_IdAndInvalidatedAtIsNullAndCreatedAtBeforeOrderByCreatedAtDesc(conversationId, createdAt);
         Collections.reverse(newest);
 
         int fromIndex = Math.max(0, newest.size() - Math.max(1, limit));
@@ -109,7 +167,7 @@ public class ConversationService {
 
     @Transactional(readOnly = true)
     public boolean shouldRefreshSummary(UUID conversationId, int minMessages, int refreshInterval) {
-        long messageCount = messageRepository.countByConversation_Id(conversationId);
+        long messageCount = messageRepository.countByConversation_IdAndInvalidatedAtIsNull(conversationId);
         if (messageCount < minMessages) {
             return false;
         }
@@ -121,7 +179,7 @@ public class ConversationService {
 
     @Transactional(readOnly = true)
     public List<ChatMessage> messagesForSummary(UUID conversationId, int limit) {
-        List<MessageEntity> newest = messageRepository.findTop20ByConversation_IdOrderByCreatedAtDesc(conversationId);
+        List<MessageEntity> newest = messageRepository.findTop20ByConversation_IdAndInvalidatedAtIsNullOrderByCreatedAtDesc(conversationId);
         Collections.reverse(newest);
 
         int fromIndex = Math.max(0, newest.size() - Math.max(1, limit));
@@ -137,7 +195,7 @@ public class ConversationService {
             return;
         }
 
-        long messageCount = messageRepository.countByConversation_Id(conversation.getId());
+        long messageCount = messageRepository.countByConversation_IdAndInvalidatedAtIsNull(conversation.getId());
         ConversationSummaryEntity entity = conversationSummaryRepository.findByConversation_Id(conversation.getId())
                 .orElseGet(() -> {
                     ConversationSummaryEntity next = new ConversationSummaryEntity();
@@ -162,7 +220,44 @@ public class ConversationService {
                                               boolean realtimeSearchUsed,
                                               boolean modelAvailable,
                                               List<SearchResult> sources) {
-        return saveMessage(conversation, "assistant", content, model, realtimeSearchUsed, modelAvailable, sources);
+        return saveMessage(conversation, "assistant", content, model, realtimeSearchUsed, modelAvailable, sources, "completed");
+    }
+
+    @Transactional
+    public MessageEntity saveAssistantMessage(ConversationEntity conversation,
+                                              String content,
+                                              String model,
+                                              boolean realtimeSearchUsed,
+                                              boolean modelAvailable,
+                                              List<SearchResult> sources,
+                                              String status) {
+        return saveMessage(conversation, "assistant", content, model, realtimeSearchUsed, modelAvailable, sources, status);
+    }
+
+    @Transactional
+    public MessageEntity editUserMessageAndInvalidateAfter(String conversationId, String messageId, String content) {
+        UUID conversationUuid = parseConversationId(conversationId).orElseThrow();
+        UUID messageUuid = parseConversationId(messageId).orElseThrow();
+        MessageEntity message = messageRepository.findById(messageUuid).orElseThrow();
+        if (!conversationUuid.equals(message.getConversation().getId()) || !"user".equals(message.getRole())) {
+            throw new IllegalArgumentException("只能编辑当前会话中的用户消息。");
+        }
+
+        Instant now = Instant.now();
+        message.setContent(content == null ? "" : content.trim());
+        message.setRevision(message.getRevision() + 1);
+        message.setEditedAt(now);
+        messageRepository.save(message);
+
+        messageRepository.invalidateAfter(conversationUuid, message.getCreatedAt(), now);
+        agentRunService.invalidateAfterOrForUserMessage(conversationUuid, messageUuid, message.getCreatedAt());
+        memoryService.invalidateAfter(conversationUuid, message.getCreatedAt());
+        conversationSummaryRepository.deleteByConversation_Id(conversationUuid);
+
+        ConversationEntity conversation = message.getConversation();
+        conversation.touch();
+        conversationRepository.save(conversation);
+        return message;
     }
 
     private MessageEntity saveMessage(ConversationEntity conversation,
@@ -172,6 +267,17 @@ public class ConversationService {
                                       Boolean realtimeSearchUsed,
                                       Boolean modelAvailable,
                                       List<SearchResult> sources) {
+        return saveMessage(conversation, role, content, model, realtimeSearchUsed, modelAvailable, sources, "completed");
+    }
+
+    private MessageEntity saveMessage(ConversationEntity conversation,
+                                      String role,
+                                      String content,
+                                      String model,
+                                      Boolean realtimeSearchUsed,
+                                      Boolean modelAvailable,
+                                      List<SearchResult> sources,
+                                      String status) {
         MessageEntity message = new MessageEntity();
         message.setConversation(conversation);
         message.setRole(role);
@@ -180,6 +286,7 @@ public class ConversationService {
         message.setRealtimeSearchUsed(realtimeSearchUsed);
         message.setModelAvailable(modelAvailable);
         message.setSourcesJson(writeSources(sources));
+        message.setStatus(StringUtils.hasText(status) ? status : "completed");
 
         conversation.touch();
         conversationRepository.save(conversation);
@@ -187,7 +294,7 @@ public class ConversationService {
     }
 
     private void ensureConversationTitle(ConversationEntity conversation, String firstUserMessage) {
-        long messageCount = messageRepository.countByConversation_Id(conversation.getId());
+        long messageCount = messageRepository.countByConversation_IdAndInvalidatedAtIsNull(conversation.getId());
         if (messageCount == 0 && (!StringUtils.hasText(conversation.getTitle()) || DEFAULT_TITLE.equals(conversation.getTitle()))) {
             conversation.setTitle(generateTitle(firstUserMessage));
         }
@@ -202,17 +309,98 @@ public class ConversationService {
         );
     }
 
-    private ConversationMessageResponse toMessageResponse(MessageEntity message) {
+    private ConversationMessageResponse toMessageResponse(MessageEntity message, AgentRunContext agentRunContext) {
+        String content = message.getContent();
+        if ("assistant".equals(message.getRole()) && !StringUtils.hasText(content) && agentRunContext != null) {
+            content = recoverRunAnswer(agentRunContext);
+        }
+        String status = message.getStatus();
+        if ("assistant".equals(message.getRole()) && agentRunContext != null && !"completed".equals(status)) {
+            status = agentRunContext.run().getStatus();
+        }
+        Boolean realtimeSearchUsed = message.getRealtimeSearchUsed();
+        Boolean modelAvailable = message.getModelAvailable();
+        List<SearchResult> sources = readSources(message.getSourcesJson());
+        if ("assistant".equals(message.getRole()) && agentRunContext != null) {
+            realtimeSearchUsed = realtimeSearchUsed == null ? agentRunContext.run().getRealtimeSearchUsed() : realtimeSearchUsed;
+            modelAvailable = modelAvailable == null ? agentRunContext.run().getModelAvailable() : modelAvailable;
+            if (sources.isEmpty()) {
+                sources = readSources(agentRunContext.run().getSourcesJson());
+            }
+        }
         return new ConversationMessageResponse(
                 message.getId(),
                 message.getRole(),
-                message.getContent(),
+                content,
                 message.getModel(),
-                message.getRealtimeSearchUsed(),
-                message.getModelAvailable(),
-                readSources(message.getSourcesJson()),
+                realtimeSearchUsed,
+                modelAvailable,
+                sources,
+                status,
+                message.getRevision(),
+                message.getEditedAt(),
+                agentRunContext == null ? null : agentRunContext.run().getId(),
+                agentRunContext == null ? List.of() : agentRunContext.steps(),
+                null,
+                null,
+                null,
                 message.getCreatedAt()
         );
+    }
+
+    private ConversationMessageResponse toRunMessageResponse(AgentRunContext agentRunContext) {
+        Map<String, Object> pendingInput = agentRunService.readPendingToolInput(agentRunContext.run());
+        String pendingToolInput = stringValue(pendingInput.get("query"));
+        String pendingToolReason = stringValue(pendingInput.get("reason"));
+        String content = recoverRunAnswer(agentRunContext);
+        return new ConversationMessageResponse(
+                agentRunContext.run().getId(),
+                "assistant",
+                content,
+                agentRunContext.run().getModel(),
+                agentRunContext.run().getRealtimeSearchUsed(),
+                agentRunContext.run().getModelAvailable(),
+                readSources(agentRunContext.run().getSourcesJson()),
+                agentRunContext.run().getStatus(),
+                1,
+                null,
+                agentRunContext.run().getId(),
+                agentRunContext.steps(),
+                agentRunContext.run().getPendingToolName(),
+                pendingToolInput,
+                pendingToolReason,
+                agentRunContext.run().getCreatedAt()
+        );
+    }
+
+    private boolean isLegacyEmptyAssistantPlaceholder(MessageEntity message, AgentRunContext agentRunContext) {
+        return "assistant".equals(message.getRole())
+                && !StringUtils.hasText(message.getContent())
+                && "streaming".equals(message.getStatus())
+                && (agentRunContext == null || !StringUtils.hasText(recoverRunAnswer(agentRunContext)));
+    }
+
+    private String recoverRunAnswer(AgentRunContext agentRunContext) {
+        if (agentRunContext == null) {
+            return "";
+        }
+        if (StringUtils.hasText(agentRunContext.run().getFinalAnswer())) {
+            return agentRunContext.run().getFinalAnswer();
+        }
+        if (StringUtils.hasText(agentRunContext.run().getPartialAnswer())) {
+            return agentRunContext.run().getPartialAnswer();
+        }
+        if (StringUtils.hasText(agentRunContext.run().getErrorMessage())) {
+            return agentRunContext.run().getErrorMessage();
+        }
+        if ("cancelled".equals(agentRunContext.run().getStatus())) {
+            return "回答已中断。你可以编辑上一条问题后重新发送。";
+        }
+        return "";
+    }
+
+    private String stringValue(Object value) {
+        return value == null ? null : String.valueOf(value);
     }
 
     private Optional<UUID> parseConversationId(String conversationId) {

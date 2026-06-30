@@ -432,6 +432,7 @@ onUnmounted(() => {
   overflow: hidden;
   background: transparent;
   user-select: none;
+  pointer-events: none;
 }
 
 .pet-button {
@@ -443,6 +444,7 @@ onUnmounted(() => {
   background: transparent;
   cursor: grab;
   -webkit-app-region: no-drag;
+  pointer-events: auto;
   animation: pet-float 3.4s ease-in-out infinite;
   transform-origin: 50% 82%;
   outline: none;

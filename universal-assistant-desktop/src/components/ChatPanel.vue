@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import {
   Bot,
   ChevronDown,
   ChevronUp,
   Cpu,
+  Check,
+  Edit3,
   FileText,
   FolderOpen,
   History as HistoryIcon,
@@ -15,13 +17,18 @@ import {
   Search,
   Send,
   Sparkles,
+  Square,
+  Trash2,
   X,
 } from '@lucide/vue'
 import {
+  cancelAgentRun,
+  deleteConversation,
   listConversations,
   loadConversationMessages,
   sendChat,
   streamChat,
+  updateConversation,
   type AgentStep,
   type ChatMessage,
   type ChatRequest,
@@ -43,6 +50,14 @@ type UiMessage = ChatMessage & {
   model?: string
   agentRunId?: string
   agentSteps?: AgentStep[]
+  status?: string
+  revision?: number
+  editedAt?: string
+  pendingTool?: {
+    name: string
+    input: string
+    reason: string
+  }
   phase?: ChatStreamPhase
   isStreaming?: boolean
 }
@@ -60,8 +75,10 @@ const phaseLabels: Record<UiPhase, string> = {
   planning: '规划中',
   acting: '调用工具中',
   searching: '检索中',
+  waiting_confirmation: '等待确认',
   reflecting: '反思中',
   answering: '回答中',
+  cancelled: '回答已中断',
   done: '回答完毕',
   error: '出错',
 }
@@ -92,6 +109,12 @@ const fileDirty = ref(false)
 const targetFormat = ref('md')
 const errorText = ref('')
 const messageListRef = ref<HTMLElement | null>(null)
+const editingMessageId = ref<string | number>()
+const editingDraft = ref('')
+const renamingConversationId = ref<string>()
+const renamingTitle = ref('')
+let activeAbortController: AbortController | undefined
+let activeAssistantMessage: UiMessage | undefined
 
 const isElectron = computed(() => Boolean(window.assistant))
 const assistantStatus = computed(() => phaseLabels[currentPhase.value])
@@ -117,16 +140,77 @@ let typewriterTimer: number | undefined
 let typewriterQueue = ''
 let typewriterMessage: UiMessage | undefined
 let pendingDoneMessage: UiMessage | undefined
+let conversationRetryTimer: number | undefined
+let conversationRetryDelay = 2000
 
 onMounted(async () => {
-  await refreshConversations()
+  await refreshConversations({ retryOnFailure: true })
   if (!currentConversationId.value && conversations.value.length > 0) {
     await openConversation(conversations.value[0])
   }
 })
 
+onUnmounted(() => {
+  window.clearTimeout(conversationRetryTimer)
+  window.clearTimeout(phaseResetTimer)
+  window.clearTimeout(petIdleTimer)
+  window.clearInterval(typewriterTimer)
+})
+
 function nextId() {
   return Date.now() + Math.floor(Math.random() * 1000)
+}
+
+function restoredAssistantContent(message: ConversationMessage) {
+  if (message.role !== 'assistant' || message.content.trim()) {
+    return message.content
+  }
+
+  if (message.status === 'cancelled') {
+    return '回答已中断。你可以编辑上一条问题后重新发送。'
+  }
+  if (message.status === 'running' || message.status === 'waiting_confirmation') {
+    return ''
+  }
+  if (message.status === 'streaming') {
+    return '上次生成未完成，未收到可恢复的回答内容。'
+  }
+  if (message.status === 'failed') {
+    return '回答失败，未收到可恢复的回答内容。'
+  }
+
+  return '回答内容未保存或未生成完整内容。'
+}
+
+function restoredAssistantPhase(message: ConversationMessage): ChatStreamPhase | undefined {
+  if (message.role !== 'assistant') {
+    return undefined
+  }
+  if (message.status === 'failed') {
+    return 'error'
+  }
+  if (message.status === 'cancelled') {
+    return 'cancelled'
+  }
+  if (message.status === 'waiting_confirmation') {
+    return 'waiting_confirmation'
+  }
+  if (message.status === 'running') {
+    return 'thinking'
+  }
+  if (message.status === 'streaming') {
+    return 'thinking'
+  }
+
+  return 'done'
+}
+
+function restoredModelAvailable(message: ConversationMessage) {
+  if (message.role === 'assistant' && message.status === 'failed') {
+    return false
+  }
+
+  return message.modelAvailable
 }
 
 function toUiMessage(message: ConversationMessage): UiMessage {
@@ -134,13 +218,24 @@ function toUiMessage(message: ConversationMessage): UiMessage {
     id: message.id,
     messageId: message.id,
     role: message.role,
-    content: message.content,
+    content: restoredAssistantContent(message),
     model: message.model,
     realtimeSearchUsed: message.realtimeSearchUsed,
-    modelAvailable: message.modelAvailable,
+    modelAvailable: restoredModelAvailable(message),
     sources: message.sources || [],
-    agentSteps: [],
-    phase: message.role === 'assistant' ? 'done' : undefined,
+    status: message.status,
+    revision: message.revision,
+    editedAt: message.editedAt,
+    agentRunId: message.agentRunId,
+    agentSteps: message.agentSteps || [],
+    pendingTool: message.pendingToolName
+      ? {
+          name: message.pendingToolName,
+          input: message.pendingToolInput || '',
+          reason: message.pendingToolReason || 'Agent 判断需要实时检索。',
+        }
+      : undefined,
+    phase: restoredAssistantPhase(message),
     isStreaming: false,
   }
 }
@@ -156,12 +251,44 @@ function recentHistory() {
   return messages.value.slice(-8).map(({ role, content }) => ({ role, content }))
 }
 
-async function refreshConversations() {
+function clearConversationRetry() {
+  window.clearTimeout(conversationRetryTimer)
+  conversationRetryTimer = undefined
+  conversationRetryDelay = 2000
+}
+
+function scheduleConversationRetry() {
+  if (conversationRetryTimer !== undefined) {
+    return
+  }
+
+  const delay = conversationRetryDelay
+  conversationRetryDelay = Math.min(Math.round(conversationRetryDelay * 1.8), 10000)
+  conversationRetryTimer = window.setTimeout(async () => {
+    conversationRetryTimer = undefined
+    const loaded = await refreshConversations({ retryOnFailure: true })
+    if (loaded && !currentConversationId.value && conversations.value.length > 0) {
+      await openConversation(conversations.value[0])
+    }
+  }, delay)
+}
+
+async function refreshConversations(options: { retryOnFailure?: boolean } = {}) {
   conversationsLoading.value = true
   try {
     conversations.value = await listConversations()
+    clearConversationRetry()
+    if (errorText.value.includes('历史会话加载失败')) {
+      errorText.value = ''
+    }
+    return true
   } catch (error) {
-    errorText.value = error instanceof Error ? error.message : String(error)
+    const message = error instanceof Error ? error.message : String(error)
+    errorText.value = `历史会话加载失败：${message}。后端恢复后会自动重试。`
+    if (options.retryOnFailure) {
+      scheduleConversationRetry()
+    }
+    return false
   } finally {
     conversationsLoading.value = false
   }
@@ -198,6 +325,17 @@ async function openConversation(conversation: ConversationSummary) {
   } catch (error) {
     errorText.value = error instanceof Error ? error.message : String(error)
   }
+}
+
+async function refreshCurrentConversationMessages() {
+  if (!currentConversationId.value) {
+    return
+  }
+
+  const response = await loadConversationMessages(currentConversationId.value)
+  const loadedMessages = response.messages.map(toUiMessage)
+  messages.value = loadedMessages.length ? loadedMessages : [welcomeMessage()]
+  scrollMessagesToBottom()
 }
 
 function formatConversationTime(value: string) {
@@ -259,7 +397,7 @@ function mergeSources(existing: SearchResult[] | undefined, incoming: SearchResu
 }
 
 function completeAssistantMessage(message: UiMessage) {
-  if (message.phase === 'error') {
+  if (message.phase === 'error' || message.phase === 'cancelled' || message.status === 'cancelled') {
     return
   }
 
@@ -267,6 +405,20 @@ function completeAssistantMessage(message: UiMessage) {
   message.isStreaming = false
   setCurrentPhase('done')
   schedulePetIdle(900)
+  resetCurrentPhaseLater()
+  scrollMessagesToBottom()
+}
+
+function markMessageCancelled(message: UiMessage) {
+  flushTypewriter(message)
+  if (!message.content.trim()) {
+    message.content = '回答已中断。你可以编辑上一条问题后重新发送。'
+  }
+  message.status = 'cancelled'
+  message.phase = 'cancelled'
+  message.isStreaming = false
+  setCurrentPhase('cancelled')
+  schedulePetIdle(600)
   resetCurrentPhaseLater()
   scrollMessagesToBottom()
 }
@@ -324,6 +476,7 @@ function flushTypewriter(message: UiMessage) {
   typewriterQueue = ''
   window.clearInterval(typewriterTimer)
   typewriterTimer = undefined
+  typewriterMessage = undefined
   if (pendingDoneMessage === message) {
     pendingDoneMessage = undefined
   }
@@ -352,8 +505,23 @@ function stepStatusLabel(status: string) {
   if (status === 'failed') {
     return '失败'
   }
+  if (status === 'degraded') {
+    return '降级完成'
+  }
   if (status === 'running') {
     return '进行中'
+  }
+  if (status === 'waiting') {
+    return '等待确认'
+  }
+  if (status === 'cancelled') {
+    return '已停止'
+  }
+  if (status === 'invalidated') {
+    return '已失效'
+  }
+  if (status === 'unavailable') {
+    return '不可用'
   }
   return status || '记录'
 }
@@ -366,7 +534,10 @@ function stepTypeLabel(type: string) {
     observation: '观察',
     memory: '记忆',
     reflection: '反思',
+    tool_confirmation: '确认',
+    user_decision: '确认',
     final: '结果',
+    warning: '提醒',
     error: '错误',
     limit: '限制',
   }
@@ -449,7 +620,7 @@ function applyStreamPhase(message: UiMessage, phase: ChatStreamPhase) {
   message.phase = phase
   setCurrentPhase(phase)
 
-  if (phase === 'thinking' || phase === 'planning' || phase === 'searching' || phase === 'acting' || phase === 'reflecting') {
+  if (phase === 'thinking' || phase === 'planning' || phase === 'searching' || phase === 'acting' || phase === 'reflecting' || phase === 'waiting_confirmation') {
     setPetState('thinking')
   } else if (phase === 'answering') {
     markPetSpeaking(0)
@@ -460,7 +631,11 @@ function applyStreamPhase(message: UiMessage, phase: ChatStreamPhase) {
   scrollMessagesToBottom()
 }
 
-function applyStreamEvent(event: ChatStreamEvent, message: UiMessage) {
+function applyStreamEvent(event: ChatStreamEvent, message: UiMessage, userMessage?: UiMessage) {
+  if (message.status === 'cancelled' && event.type !== 'meta' && event.type !== 'agent_step') {
+    return
+  }
+
   if (event.type === 'status' && event.phase) {
     applyStreamPhase(message, event.phase)
     return
@@ -473,6 +648,10 @@ function applyStreamEvent(event: ChatStreamEvent, message: UiMessage) {
     if (event.messageId) {
       message.messageId = event.messageId
       message.id = event.messageId
+    }
+    if (event.userMessageId && userMessage) {
+      userMessage.messageId = event.userMessageId
+      userMessage.id = event.userMessageId
     }
     if (event.agentRunId) {
       message.agentRunId = event.agentRunId
@@ -497,6 +676,20 @@ function applyStreamEvent(event: ChatStreamEvent, message: UiMessage) {
       existing.push(event.agentStep)
     }
     message.agentSteps = [...existing].sort((a, b) => a.index - b.index)
+    scrollMessagesToBottom()
+    return
+  }
+
+  if (event.type === 'tool_confirmation_required') {
+    message.agentRunId = event.agentRunId || message.agentRunId
+    message.pendingTool = {
+      name: event.toolName || 'web_search',
+      input: event.toolInput || '',
+      reason: event.reason || 'Agent 判断需要实时检索。',
+    }
+    message.phase = 'waiting_confirmation'
+    message.isStreaming = false
+    setCurrentPhase('waiting_confirmation')
     scrollMessagesToBottom()
     return
   }
@@ -526,7 +719,7 @@ function applyStreamEvent(event: ChatStreamEvent, message: UiMessage) {
   }
 
   if (event.type === 'done') {
-    if (message.phase !== 'error') {
+    if (message.phase !== 'error' && message.phase !== 'waiting_confirmation') {
       markDoneAfterTypewriter(message)
     }
     scrollMessagesToBottom()
@@ -544,6 +737,7 @@ function applyChatResponse(response: ChatResponse, message: UiMessage, fallbackM
   }
   message.agentRunId = response.agentRunId || message.agentRunId
   message.agentSteps = response.agentSteps || message.agentSteps || []
+  message.status = response.answer ? message.status : 'error'
   message.sources = mergeSources(message.sources, response.sources)
   message.realtimeSearchUsed = message.realtimeSearchUsed || response.realtimeSearchUsed
   message.modelAvailable = response.modelAvailable
@@ -581,7 +775,7 @@ async function send() {
   }
 
   const history = recentHistory()
-  appendMessage({ role: 'user', content: prepared.message })
+  const userMessage = appendMessage({ role: 'user', content: prepared.message })
   const assistantMessage = appendMessage({
     role: 'assistant',
     content: '',
@@ -590,31 +784,67 @@ async function send() {
     phase: 'thinking',
     isStreaming: true,
   })
+  await runChatRequest(prepared.message, prepared.model, assistantMessage, undefined, history, userMessage)
+}
+
+async function runChatRequest(message: string, model: string, assistantMessage: UiMessage, editMessageId?: string, requestHistory: ChatMessage[] = recentHistory(), userMessage?: UiMessage) {
   isSending.value = true
+  activeAssistantMessage = assistantMessage
+  activeAbortController = new AbortController()
   errorText.value = ''
   applyStreamPhase(assistantMessage, 'thinking')
   const chatRequest: ChatRequest = {
-    message: prepared.message,
+    message,
     realtimeSearch: realtimeSearch.value,
-    model: prepared.model,
-    history,
+    model,
+    history: requestHistory,
     conversationId: currentConversationId.value,
+    editMessageId,
   }
   let receivedStreamContent = false
+  let receivedAnyStreamEvent = false
+  let receivedDoneEvent = false
 
   try {
     await streamChat(chatRequest, {
       onEvent: (event) => {
+        receivedAnyStreamEvent = true
+        if (event.type === 'done') {
+          receivedDoneEvent = true
+        }
         if (event.type === 'delta' && event.content?.trim()) {
           receivedStreamContent = true
         }
-        applyStreamEvent(event, assistantMessage)
+        applyStreamEvent(event, assistantMessage, userMessage)
       },
-    })
+    }, activeAbortController.signal)
+
+    if (assistantMessage.phase === 'waiting_confirmation') {
+      return
+    }
 
     if (!receivedStreamContent && assistantMessage.phase !== 'error') {
-      const response = await sendChat(chatRequest)
-      applyChatResponse(response, assistantMessage, prepared.model)
+      if (assistantMessage.messageId && currentConversationId.value) {
+        await refreshCurrentConversationMessages()
+        return
+      }
+
+      if (!receivedAnyStreamEvent && !editMessageId) {
+        const response = await sendChat(chatRequest)
+        applyChatResponse(response, assistantMessage, model)
+        return
+      }
+
+      if (receivedDoneEvent && !assistantMessage.content.trim()) {
+        assistantMessage.content = '没有收到模型返回内容。'
+        assistantMessage.modelAvailable = false
+        assistantMessage.phase = 'error'
+        assistantMessage.isStreaming = false
+        setCurrentPhase('error')
+        markPetError()
+        return
+      }
+
       return
     }
 
@@ -622,10 +852,20 @@ async function send() {
       markDoneAfterTypewriter(assistantMessage)
     }
   } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      markMessageCancelled(assistantMessage)
+      return
+    }
     try {
-      if (!assistantMessage.content.trim()) {
+      const canUseHttpFallback = !editMessageId && !assistantMessage.messageId && !assistantMessage.agentRunId
+      if (canUseHttpFallback && !assistantMessage.content.trim()) {
         const response = await sendChat(chatRequest)
-        applyChatResponse(response, assistantMessage, prepared.model)
+        applyChatResponse(response, assistantMessage, model)
+        return
+      }
+
+      if (assistantMessage.messageId && currentConversationId.value) {
+        await refreshCurrentConversationMessages()
         return
       }
 
@@ -642,8 +882,251 @@ async function send() {
     }
   } finally {
     isSending.value = false
+    activeAbortController = undefined
+    activeAssistantMessage = undefined
     void refreshConversations()
     scrollMessagesToBottom()
+  }
+}
+
+async function stopGeneration() {
+  const message = activeAssistantMessage
+  const controller = activeAbortController
+  if (!isSending.value) {
+    return
+  }
+
+  if (!message) {
+    controller?.abort()
+    isSending.value = false
+    activeAbortController = undefined
+    activeAssistantMessage = undefined
+    resetCurrentPhaseLater(0)
+    return
+  }
+
+  markMessageCancelled(message)
+
+  const cancelRequest = {
+    answer: message.content || '回答已中断。你可以编辑上一条问题后重新发送。',
+    model: message.model,
+    realtimeSearchUsed: Boolean(message.realtimeSearchUsed),
+    modelAvailable: message.modelAvailable !== false,
+    sources: message.sources || [],
+  }
+  const runId = message.agentRunId
+
+  isSending.value = false
+  activeAbortController = undefined
+  activeAssistantMessage = undefined
+  resetCurrentPhaseLater()
+  scrollMessagesToBottom()
+
+  if (runId) {
+    void cancelAgentRun(runId, cancelRequest)
+      .then((response) => {
+        if (response.messageId) {
+          message.messageId = response.messageId
+          message.id = response.messageId
+        }
+        if (response.realtimeSearchUsed) {
+          message.realtimeSearchUsed = true
+        }
+        message.agentSteps = response.agentSteps || message.agentSteps || []
+        void refreshConversations()
+      })
+      .catch((error) => {
+        errorText.value = error instanceof Error ? error.message : String(error)
+      })
+  }
+
+  window.setTimeout(() => {
+    if (runId === message.agentRunId) {
+      controller?.abort()
+    }
+  }, runId ? 80 : 0)
+}
+
+function startEditMessage(message: UiMessage) {
+  if (isSending.value || message.role !== 'user' || !message.messageId) {
+    return
+  }
+
+  editingMessageId.value = message.id
+  editingDraft.value = message.content
+}
+
+function cancelEditMessage() {
+  editingMessageId.value = undefined
+  editingDraft.value = ''
+}
+
+async function submitEditedMessage(message: UiMessage) {
+  const text = editingDraft.value.trim()
+  if (!text || isSending.value || !message.messageId) {
+    return
+  }
+
+  const messageIndex = messages.value.findIndex((item) => item.id === message.id)
+  if (messageIndex < 0) {
+    return
+  }
+
+  const prepared = prepareDraft(text)
+  if (!prepared || !prepared.message) {
+    return
+  }
+
+  message.content = prepared.message
+  message.revision = (message.revision || 1) + 1
+  message.editedAt = new Date().toISOString()
+  messages.value = messages.value.slice(0, messageIndex + 1)
+  cancelEditMessage()
+
+  const assistantMessage = appendMessage({
+    role: 'assistant',
+    content: '',
+    model: prepared.model,
+    modelAvailable: true,
+    phase: 'thinking',
+    isStreaming: true,
+  })
+  const history = messages.value.slice(0, messageIndex).slice(-8).map(({ role, content }) => ({ role, content }))
+  await runChatRequest(prepared.message, prepared.model, assistantMessage, message.messageId, history, message)
+  if (assistantMessage.phase !== 'waiting_confirmation') {
+    try {
+      await refreshCurrentConversationMessages()
+    } catch (error) {
+      errorText.value = error instanceof Error ? error.message : String(error)
+    }
+  }
+}
+
+async function handleToolDecision(message: UiMessage, decision: 'approved' | 'denied') {
+  if (!message.agentRunId || isSending.value) {
+    return
+  }
+
+  if (decision === 'approved') {
+    realtimeSearch.value = true
+    message.realtimeSearchUsed = true
+  }
+  message.pendingTool = undefined
+  message.phase = 'thinking'
+  message.isStreaming = true
+  message.content = ''
+  message.sources = []
+  isSending.value = true
+  activeAssistantMessage = message
+  activeAbortController = new AbortController()
+  setCurrentPhase('thinking')
+
+  const chatRequest: ChatRequest = {
+    message: '',
+    model: message.model || selectedModel.value,
+    conversationId: currentConversationId.value,
+    agentRunId: message.agentRunId,
+    toolDecision: decision,
+  }
+  let receivedStreamContent = false
+
+  try {
+    await streamChat(chatRequest, {
+      onEvent: (event) => {
+        if (event.type === 'delta' && event.content?.trim()) {
+          receivedStreamContent = true
+        }
+        applyStreamEvent(event, message)
+      },
+    }, activeAbortController.signal)
+    if (!receivedStreamContent && message.messageId && currentConversationId.value) {
+      await refreshCurrentConversationMessages()
+      return
+    }
+    if ((message.phase as UiPhase | undefined) !== 'error') {
+      markDoneAfterTypewriter(message)
+    }
+  } catch (error) {
+    if (!(error instanceof DOMException && error.name === 'AbortError')) {
+      flushTypewriter(message)
+      message.content = error instanceof Error ? error.message : String(error)
+      message.phase = 'error'
+      message.isStreaming = false
+      markPetError()
+    }
+  } finally {
+    isSending.value = false
+    activeAssistantMessage = undefined
+    activeAbortController = undefined
+    void refreshConversations()
+    scrollMessagesToBottom()
+  }
+}
+
+async function startRenameConversation(conversation: ConversationSummary) {
+  if (isSending.value) {
+    return
+  }
+
+  renamingConversationId.value = conversation.id
+  renamingTitle.value = conversation.title
+
+  await nextTick()
+  const input = document.querySelector<HTMLInputElement>(`[data-rename-conversation-id="${conversation.id}"]`)
+  input?.focus()
+  input?.select()
+}
+
+function cancelRenameConversation() {
+  renamingConversationId.value = undefined
+  renamingTitle.value = ''
+}
+
+async function submitRenameConversation(conversation: ConversationSummary) {
+  if (isSending.value) {
+    return
+  }
+
+  const nextTitle = renamingTitle.value.trim()
+  if (!nextTitle) {
+    return
+  }
+
+  if (nextTitle === conversation.title) {
+    cancelRenameConversation()
+    return
+  }
+
+  try {
+    const updated = await updateConversation(conversation.id, nextTitle)
+    conversations.value = conversations.value.map((item) => (item.id === updated.id ? updated : item))
+    cancelRenameConversation()
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : String(error)
+  }
+}
+
+async function removeConversation(conversation: ConversationSummary) {
+  if (isSending.value) {
+    return
+  }
+
+  const confirmed = window.confirm(`确认删除会话「${conversation.title}」？删除后不会出现在历史列表中。`)
+  if (!confirmed) {
+    return
+  }
+
+  try {
+    await deleteConversation(conversation.id)
+    conversations.value = conversations.value.filter((item) => item.id !== conversation.id)
+    if (renamingConversationId.value === conversation.id) {
+      cancelRenameConversation()
+    }
+    if (currentConversationId.value === conversation.id) {
+      startNewConversation()
+    }
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : String(error)
   }
 }
 
@@ -803,18 +1286,46 @@ async function convertSelectedFile() {
         </button>
       </div>
       <div class="conversation-list">
-        <button
+        <div
           v-for="conversation in conversations"
           :key="conversation.id"
           class="conversation-item"
-          :class="{ active: conversation.id === currentConversationId }"
-          type="button"
-          :disabled="isSending"
-          @click="openConversation(conversation)"
+          :class="{ active: conversation.id === currentConversationId, renaming: renamingConversationId === conversation.id }"
         >
-          <span>{{ conversation.title }}</span>
-          <small>{{ formatConversationTime(conversation.updatedAt) }}</small>
-        </button>
+          <form
+            v-if="renamingConversationId === conversation.id"
+            class="conversation-rename"
+            @submit.prevent="submitRenameConversation(conversation)"
+          >
+            <input
+              v-model="renamingTitle"
+              type="text"
+              aria-label="会话名称"
+              :data-rename-conversation-id="conversation.id"
+              @keydown.esc.prevent="cancelRenameConversation"
+            />
+            <button class="ghost-icon small" type="submit" title="保存" :disabled="isSending || !renamingTitle.trim()">
+              <Check :size="13" />
+            </button>
+            <button class="ghost-icon small" type="button" title="取消" :disabled="isSending" @click="cancelRenameConversation">
+              <X :size="13" />
+            </button>
+          </form>
+          <template v-else>
+            <button class="conversation-open" type="button" :disabled="isSending" @click="openConversation(conversation)">
+              <span>{{ conversation.title }}</span>
+              <small>{{ formatConversationTime(conversation.updatedAt) }}</small>
+            </button>
+            <div class="conversation-actions">
+              <button class="ghost-icon small" type="button" title="重命名" :disabled="isSending" @click="startRenameConversation(conversation)">
+                <Edit3 :size="13" />
+              </button>
+              <button class="ghost-icon small danger" type="button" title="删除" :disabled="isSending" @click="removeConversation(conversation)">
+                <Trash2 :size="13" />
+              </button>
+            </div>
+          </template>
+        </div>
         <p v-if="!conversationsLoading && conversations.length === 0" class="empty-conversation">暂无历史会话</p>
         <p v-if="conversationsLoading" class="empty-conversation">加载中...</p>
       </div>
@@ -826,47 +1337,80 @@ async function convertSelectedFile() {
         <span v-if="message.role === 'assistant'" class="message-avatar" aria-hidden="true">
           <Bot :size="15" />
         </span>
-        <div class="message">
-          <MarkdownMessage v-if="message.role === 'assistant' && message.content" :content="message.content" />
-          <p v-else-if="message.role === 'user'">{{ message.content }}</p>
-          <div v-else class="message-progress">
-            <span class="typing-dots" aria-hidden="true">
-              <span />
-              <span />
-              <span />
-            </span>
-            <small>{{ phaseLabel(message.phase) || '准备中' }}</small>
+        <div class="message-stack">
+          <div class="message">
+            <details v-if="message.role === 'assistant' && message.agentSteps?.length" class="agent-steps" :open="message.isStreaming">
+              <summary>
+                <Sparkles :size="13" />
+                <span>执行过程</span>
+                <small>{{ message.agentSteps.length }} 步</small>
+              </summary>
+              <ol>
+                <li v-for="step in message.agentSteps" :key="step.id" :class="{ failed: step.status === 'failed' }">
+                  <div>
+                    <strong>{{ step.title }}</strong>
+                    <small>{{ stepTypeLabel(step.type) }} · {{ stepStatusLabel(step.status) }}</small>
+                  </div>
+                  <p v-if="step.content">{{ step.content }}</p>
+                </li>
+              </ol>
+            </details>
+            <MarkdownMessage v-if="message.role === 'assistant' && message.content" :content="message.content" />
+            <div v-else-if="message.role === 'user' && editingMessageId === message.id" class="edit-message">
+              <textarea v-model="editingDraft" rows="3" @keydown.enter.exact.prevent="submitEditedMessage(message)" />
+              <div>
+                <button class="tool-button compact" type="button" :disabled="!editingDraft.trim()" @click="submitEditedMessage(message)">
+                  <Check :size="13" />
+                  重新发送
+                </button>
+                <button class="tool-button compact" type="button" @click="cancelEditMessage">取消</button>
+              </div>
+            </div>
+            <p v-else-if="message.role === 'user'">{{ message.content }}</p>
+            <div v-if="message.role === 'assistant' && !message.content && message.status !== 'cancelled'" class="message-progress">
+              <span class="typing-dots" aria-hidden="true">
+                <span />
+                <span />
+                <span />
+              </span>
+              <small>{{ phaseLabel(message.phase) || '准备中' }}</small>
+            </div>
+            <div v-if="message.pendingTool" class="tool-confirmation">
+              <strong>需要实时检索</strong>
+              <p>{{ message.pendingTool.reason }}</p>
+              <small v-if="message.pendingTool.input">检索词：{{ message.pendingTool.input }}</small>
+              <div>
+                <button class="tool-button compact" type="button" :disabled="isSending" @click="handleToolDecision(message, 'approved')">
+                  <Search :size="13" />
+                  允许检索
+                </button>
+                <button class="tool-button compact" type="button" :disabled="isSending" @click="handleToolDecision(message, 'denied')">
+                  不联网回答
+                </button>
+              </div>
+            </div>
+            <div v-if="message.sources?.length" class="sources">
+              <a v-for="source in message.sources" :key="source.url" :href="source.url" target="_blank" rel="noreferrer">
+                <span>{{ source.title }}</span>
+                <small>{{ sourceLabel(source) }}</small>
+              </a>
+            </div>
+            <div
+              v-if="message.phase || message.editedAt || message.status === 'cancelled' || message.realtimeSearchUsed || (message.model && message.role === 'assistant') || message.modelAvailable === false"
+              class="message-meta"
+            >
+              <small v-if="message.phase && message.role === 'assistant'">{{ phaseLabel(message.phase) }}</small>
+              <small v-if="message.status === 'cancelled'">可编辑问题后重发</small>
+              <small v-if="message.editedAt && message.role === 'user'">已编辑</small>
+              <small v-if="message.realtimeSearchUsed">实时检索</small>
+              <small v-if="message.model && message.role === 'assistant'">{{ modelLabel(message.model) }}</small>
+              <small v-if="message.modelAvailable === false">模型未连接或调用失败</small>
+            </div>
           </div>
-          <details v-if="message.role === 'assistant' && message.agentSteps?.length" class="agent-steps" :open="message.isStreaming">
-            <summary>
-              <Sparkles :size="13" />
-              <span>执行过程</span>
-              <small>{{ message.agentSteps.length }} 步</small>
-            </summary>
-            <ol>
-              <li v-for="step in message.agentSteps" :key="step.id" :class="{ failed: step.status === 'failed' }">
-                <div>
-                  <strong>{{ step.title }}</strong>
-                  <small>{{ stepTypeLabel(step.type) }} · {{ stepStatusLabel(step.status) }}</small>
-                </div>
-                <p v-if="step.content">{{ step.content }}</p>
-              </li>
-            </ol>
-          </details>
-          <div v-if="message.sources?.length" class="sources">
-            <a v-for="source in message.sources" :key="source.url" :href="source.url" target="_blank" rel="noreferrer">
-              <span>{{ source.title }}</span>
-              <small>{{ sourceLabel(source) }}</small>
-            </a>
-          </div>
-          <div
-            v-if="message.phase || message.realtimeSearchUsed || (message.model && message.role === 'assistant') || message.modelAvailable === false"
-            class="message-meta"
-          >
-            <small v-if="message.phase && message.role === 'assistant'">{{ phaseLabel(message.phase) }}</small>
-            <small v-if="message.realtimeSearchUsed">实时检索</small>
-            <small v-if="message.model && message.role === 'assistant'">{{ modelLabel(message.model) }}</small>
-            <small v-if="message.modelAvailable === false">模型未连接或调用失败</small>
+          <div v-if="message.role === 'user' && editingMessageId !== message.id && message.messageId" class="message-actions">
+            <button class="ghost-icon small" type="button" title="编辑并重发" :disabled="isSending" @click="startEditMessage(message)">
+              <Edit3 :size="13" />
+            </button>
           </div>
         </div>
       </article>
@@ -956,8 +1500,9 @@ async function convertSelectedFile() {
           placeholder="输入问题，Shift + Enter 换行"
           @keydown.enter.exact.prevent="send"
         />
-        <button class="send-button" type="button" :disabled="isSending || !draft.trim()" title="发送" @click="send">
-          <Send :size="18" />
+        <button class="send-button" type="button" :class="{ stop: isSending }" :disabled="!isSending && !draft.trim()" :title="isSending ? '停止' : '发送'" @click="isSending ? stopGeneration() : send()">
+          <Square v-if="isSending" :size="16" />
+          <Send v-else :size="18" />
         </button>
       </div>
     </footer>
@@ -1162,28 +1707,40 @@ async function convertSelectedFile() {
 
 .conversation-item {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
   width: 100%;
-  min-height: 36px;
-  padding: 7px 9px;
+  min-height: 38px;
+  padding: 5px 6px 5px 9px;
   border: 1px solid rgba(103, 119, 150, 0.14);
   border-radius: 10px;
   color: #344057;
   background: #ffffff;
+}
+
+.conversation-open {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
   font: inherit;
   text-align: left;
 }
 
-.conversation-item span {
+.conversation-open span {
   overflow: hidden;
   font-size: 13px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.conversation-item small {
+.conversation-open small {
   color: #7a8598;
   font-size: 11px;
 }
@@ -1195,9 +1752,47 @@ async function convertSelectedFile() {
   border-color: rgba(37, 99, 235, 0.24);
 }
 
+.conversation-item.renaming {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .conversation-item:disabled {
   cursor: not-allowed;
   opacity: 0.58;
+}
+
+.conversation-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.conversation-rename {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: minmax(0, 1fr) 26px 26px;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.conversation-rename input {
+  width: 100%;
+  min-width: 0;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid rgba(37, 99, 235, 0.34);
+  border-radius: 8px;
+  outline: none;
+  color: #172033;
+  background: #ffffff;
+  font: inherit;
+  font-size: 13px;
+}
+
+.conversation-rename input:focus {
+  border-color: rgba(37, 99, 235, 0.58);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
 }
 
 .empty-conversation {
@@ -1239,8 +1834,23 @@ async function convertSelectedFile() {
   box-shadow: 0 8px 16px rgba(20, 184, 166, 0.22);
 }
 
-.message {
+.message-stack {
+  display: grid;
+  gap: 6px;
   max-width: 86%;
+}
+
+.message-row.user .message-stack {
+  justify-items: end;
+}
+
+.message-row.assistant .message-stack {
+  justify-items: start;
+}
+
+.message {
+  width: fit-content;
+  max-width: 100%;
   padding: 11px 13px;
   border: 1px solid rgba(103, 119, 150, 0.14);
   border-radius: 18px;
@@ -1256,6 +1866,46 @@ async function convertSelectedFile() {
   line-height: 1.58;
 }
 
+.message-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding-right: 6px;
+}
+
+.message-actions .ghost-icon.small {
+  color: #5b6b86;
+  background: rgba(255, 255, 255, 0.92);
+  border-color: rgba(103, 119, 150, 0.18);
+  box-shadow: 0 8px 18px rgba(30, 41, 59, 0.08);
+}
+
+.edit-message {
+  display: grid;
+  gap: 8px;
+  min-width: min(320px, 70vw);
+}
+
+.edit-message textarea {
+  width: 100%;
+  min-height: 76px;
+  resize: vertical;
+  border: 1px solid rgba(147, 165, 255, 0.45);
+  border-radius: 12px;
+  padding: 9px 10px;
+  color: #172033;
+  background: #ffffff;
+  font: inherit;
+  line-height: 1.5;
+  outline: none;
+}
+
+.edit-message div,
+.tool-confirmation div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
 .message-progress {
   display: inline-flex;
   align-items: center;
@@ -1269,11 +1919,15 @@ async function convertSelectedFile() {
 }
 
 .agent-steps {
-  margin-top: 9px;
+  margin: 0 0 9px;
   border: 1px solid rgba(20, 184, 166, 0.18);
   border-radius: 12px;
   background: rgba(240, 253, 250, 0.72);
   overflow: hidden;
+}
+
+.agent-steps:last-child {
+  margin-bottom: 0;
 }
 
 .agent-steps summary {
@@ -1354,6 +2008,32 @@ async function convertSelectedFile() {
   word-break: break-word;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
+}
+
+.tool-confirmation {
+  display: grid;
+  gap: 6px;
+  margin-top: 9px;
+  padding: 10px;
+  border: 1px solid rgba(245, 158, 11, 0.24);
+  border-radius: 12px;
+  color: #5b3a07;
+  background: rgba(255, 251, 235, 0.9);
+}
+
+.tool-confirmation strong {
+  font-size: 13px;
+}
+
+.tool-confirmation p {
+  color: #5b3a07;
+  font-size: 12px;
+}
+
+.tool-confirmation small {
+  color: #8a6116;
+  font-size: 11px;
+  word-break: break-word;
 }
 
 .message-row.user .message {
@@ -1523,6 +2203,18 @@ async function convertSelectedFile() {
   padding: 0;
 }
 
+.ghost-icon.small {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+}
+
+.ghost-icon.danger:hover:not(:disabled) {
+  color: #b91c1c;
+  border-color: rgba(239, 68, 68, 0.28);
+  background: #fff1f2;
+}
+
 .tool-pill {
   border-radius: 999px;
 }
@@ -1675,6 +2367,15 @@ select:disabled {
 
 .send-button:hover:not(:disabled) {
   background: #1d4ed8;
+}
+
+.send-button.stop {
+  background: #ef4444;
+  box-shadow: 0 12px 24px rgba(239, 68, 68, 0.22);
+}
+
+.send-button.stop:hover:not(:disabled) {
+  background: #dc2626;
 }
 
 .format-picker {

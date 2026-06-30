@@ -17,12 +17,16 @@ public record ChatStreamEvent(
         List<SearchResult> sources,
         UUID conversationId,
         UUID messageId,
+        UUID userMessageId,
         UUID agentRunId,
-        AgentStepResponse agentStep
+        AgentStepResponse agentStep,
+        String toolName,
+        String toolInput,
+        String reason
 ) {
 
     public static ChatStreamEvent status(String phase, String message) {
-        return new ChatStreamEvent("status", phase, message, null, null, null, null, null, null, null, null, null);
+        return new ChatStreamEvent("status", phase, message, null, null, null, null, null, null, null, null, null, null, null, null, null);
     }
 
     public static ChatStreamEvent meta(String model, boolean realtimeSearchUsed, boolean modelAvailable, List<SearchResult> sources) {
@@ -36,22 +40,37 @@ public record ChatStreamEvent(
                                        UUID conversationId,
                                        UUID messageId,
                                        UUID agentRunId) {
-        return new ChatStreamEvent("meta", null, null, null, realtimeSearchUsed, modelAvailable, model, sources, conversationId, messageId, agentRunId, null);
+        return meta(model, realtimeSearchUsed, modelAvailable, sources, conversationId, messageId, null, agentRunId);
+    }
+
+    public static ChatStreamEvent meta(String model,
+                                       boolean realtimeSearchUsed,
+                                       boolean modelAvailable,
+                                       List<SearchResult> sources,
+                                       UUID conversationId,
+                                       UUID messageId,
+                                       UUID userMessageId,
+                                       UUID agentRunId) {
+        return new ChatStreamEvent("meta", null, null, null, realtimeSearchUsed, modelAvailable, model, sources, conversationId, messageId, userMessageId, agentRunId, null, null, null, null);
     }
 
     public static ChatStreamEvent delta(String content) {
-        return new ChatStreamEvent("delta", null, null, content, null, null, null, null, null, null, null, null);
+        return new ChatStreamEvent("delta", null, null, content, null, null, null, null, null, null, null, null, null, null, null, null);
     }
 
     public static ChatStreamEvent agentStep(AgentStepResponse agentStep) {
-        return new ChatStreamEvent("agent_step", null, null, null, null, null, null, null, null, null, agentStep.runId(), agentStep);
+        return new ChatStreamEvent("agent_step", null, null, null, null, null, null, null, null, null, null, agentStep.runId(), agentStep, null, null, null);
+    }
+
+    public static ChatStreamEvent toolConfirmationRequired(UUID agentRunId, String toolName, String toolInput, String reason) {
+        return new ChatStreamEvent("tool_confirmation_required", "waiting_confirmation", "需要确认联网检索", null, null, null, null, null, null, null, null, agentRunId, null, toolName, toolInput, reason);
     }
 
     public static ChatStreamEvent done() {
-        return new ChatStreamEvent("done", "done", "回答完毕", null, null, null, null, null, null, null, null, null);
+        return new ChatStreamEvent("done", "done", "回答完毕", null, null, null, null, null, null, null, null, null, null, null, null, null);
     }
 
     public static ChatStreamEvent error(String message) {
-        return new ChatStreamEvent("error", "error", message, null, null, false, null, null, null, null, null, null);
+        return new ChatStreamEvent("error", "error", message, null, null, false, null, null, null, null, null, null, null, null, null, null);
     }
 }

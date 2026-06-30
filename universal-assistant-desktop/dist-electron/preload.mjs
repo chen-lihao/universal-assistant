@@ -2,6 +2,7 @@
 const electron = require("electron");
 electron.contextBridge.exposeInMainWorld("assistant", {
   toggleChat: () => electron.ipcRenderer.invoke("assistant:toggle-chat"),
+  showChat: () => electron.ipcRenderer.invoke("assistant:show-chat"),
   hideChat: () => electron.ipcRenderer.invoke("assistant:hide-chat"),
   getBackendUrl: () => electron.ipcRenderer.invoke("assistant:get-backend-url"),
   setPetState: (state) => electron.ipcRenderer.invoke("assistant:set-pet-state", state),

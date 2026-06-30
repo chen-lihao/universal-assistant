@@ -42,8 +42,23 @@ public class AgentRunEntity {
     @Column(name = "final_answer", columnDefinition = "text")
     private String finalAnswer;
 
+    @Column(name = "partial_answer", columnDefinition = "text")
+    private String partialAnswer;
+
+    @Column(name = "error_message", columnDefinition = "text")
+    private String errorMessage;
+
     @Column(length = 80)
     private String model;
+
+    @Column(name = "realtime_search_used")
+    private Boolean realtimeSearchUsed;
+
+    @Column(name = "model_available")
+    private Boolean modelAvailable;
+
+    @Column(name = "sources_json", columnDefinition = "text")
+    private String sourcesJson;
 
     @Column(name = "max_steps", nullable = false)
     private int maxSteps;
@@ -56,6 +71,15 @@ public class AgentRunEntity {
 
     @Column(name = "completed_at")
     private Instant completedAt;
+
+    @Column(name = "invalidated_at")
+    private Instant invalidatedAt;
+
+    @Column(name = "pending_tool_name", length = 80)
+    private String pendingToolName;
+
+    @Column(name = "pending_tool_input_json", columnDefinition = "text")
+    private String pendingToolInputJson;
 
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
@@ -147,12 +171,52 @@ public class AgentRunEntity {
         this.finalAnswer = finalAnswer;
     }
 
+    public String getPartialAnswer() {
+        return partialAnswer;
+    }
+
+    public void setPartialAnswer(String partialAnswer) {
+        this.partialAnswer = partialAnswer;
+    }
+
+    public String getErrorMessage() {
+        return errorMessage;
+    }
+
+    public void setErrorMessage(String errorMessage) {
+        this.errorMessage = errorMessage;
+    }
+
     public String getModel() {
         return model;
     }
 
     public void setModel(String model) {
         this.model = model;
+    }
+
+    public Boolean getRealtimeSearchUsed() {
+        return realtimeSearchUsed;
+    }
+
+    public void setRealtimeSearchUsed(Boolean realtimeSearchUsed) {
+        this.realtimeSearchUsed = realtimeSearchUsed;
+    }
+
+    public Boolean getModelAvailable() {
+        return modelAvailable;
+    }
+
+    public void setModelAvailable(Boolean modelAvailable) {
+        this.modelAvailable = modelAvailable;
+    }
+
+    public String getSourcesJson() {
+        return sourcesJson;
+    }
+
+    public void setSourcesJson(String sourcesJson) {
+        this.sourcesJson = sourcesJson;
     }
 
     public int getMaxSteps() {
@@ -185,6 +249,30 @@ public class AgentRunEntity {
 
     public void setCompletedAt(Instant completedAt) {
         this.completedAt = completedAt;
+    }
+
+    public Instant getInvalidatedAt() {
+        return invalidatedAt;
+    }
+
+    public void setInvalidatedAt(Instant invalidatedAt) {
+        this.invalidatedAt = invalidatedAt;
+    }
+
+    public String getPendingToolName() {
+        return pendingToolName;
+    }
+
+    public void setPendingToolName(String pendingToolName) {
+        this.pendingToolName = pendingToolName;
+    }
+
+    public String getPendingToolInputJson() {
+        return pendingToolInputJson;
+    }
+
+    public void setPendingToolInputJson(String pendingToolInputJson) {
+        this.pendingToolInputJson = pendingToolInputJson;
     }
 
     public Instant getCreatedAt() {
