@@ -1,0 +1,53 @@
+name: Desktop CI
+
+on:
+  pull_request:
+    paths:
+      - 'universal-assistant-desktop/**'
+      - '.github/workflows/desktop-ci.yml'
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - 'universal-assistant-desktop/**'
+      - '.github/workflows/desktop-ci.yml'
+
+jobs:
+  desktop:
+    name: Lint, typecheck, and build desktop
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: universal-assistant-desktop
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.7.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: universal-assistant-desktop/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Check formatting
+        run: pnpm format:check
+
+      - name: Typecheck
+        run: ./node_modules/.bin/vue-tsc --noEmit
+
+      - name: Build renderer and Electron entry
+        run: ./node_modules/.bin/vite build

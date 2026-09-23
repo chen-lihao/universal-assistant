@@ -16,6 +16,10 @@ spring:
   ai:
     dashscope:
       api-key: ${DASHSCOPE_API_KEY:missing-api-key}
+      embedding:
+        options:
+          model: ${ASSISTANT_EMBEDDING_MODEL:text-embedding-v3}
+          dimensions: ${ASSISTANT_EMBEDDING_DIMENSIONS:1024}
 
 assistant:
   chat:
@@ -26,3 +30,13 @@ assistant:
   memory:
     enabled: ${ASSISTANT_MEMORY_ENABLED:true}
     retrieve-limit: ${ASSISTANT_MEMORY_RETRIEVE_LIMIT:5}
+  context:
+    max-characters: ${ASSISTANT_CONTEXT_MAX_CHARACTERS:28000}
+  rag:
+    enabled: ${ASSISTANT_RAG_ENABLED:true}
+    retrieve-limit: ${ASSISTANT_RAG_RETRIEVE_LIMIT:5}
+    chunk-size: ${ASSISTANT_RAG_CHUNK_SIZE:900}
+    chunk-overlap: ${ASSISTANT_RAG_CHUNK_OVERLAP:120}
+  skills:
+    enabled: ${ASSISTANT_SKILLS_ENABLED:true}
+    max-active: ${ASSISTANT_SKILLS_MAX_ACTIVE:2}

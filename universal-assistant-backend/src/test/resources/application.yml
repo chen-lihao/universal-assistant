@@ -15,3 +15,7 @@ spring:
       api-key: test-api-key
       agent:
         api-key: test-api-key
+
+assistant:
+  rag:
+    enabled: false

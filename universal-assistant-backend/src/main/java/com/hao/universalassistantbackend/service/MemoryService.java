@@ -3,6 +3,7 @@ package com.hao.universalassistantbackend.service;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hao.universalassistantbackend.model.MemoryHit;
+import com.hao.universalassistantbackend.rag.SemanticEmbeddingService;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -30,15 +31,18 @@ public class MemoryService {
 
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
+    private final SemanticEmbeddingService semanticEmbeddingService;
     private final boolean enabled;
     private final int retrieveLimit;
 
     public MemoryService(JdbcTemplate jdbcTemplate,
                          ObjectMapper objectMapper,
+                         SemanticEmbeddingService semanticEmbeddingService,
                          @Value("${assistant.memory.enabled:true}") boolean enabled,
                          @Value("${assistant.memory.retrieve-limit:5}") int retrieveLimit) {
         this.jdbcTemplate = jdbcTemplate;
         this.objectMapper = objectMapper;
+        this.semanticEmbeddingService = semanticEmbeddingService;
         this.enabled = enabled;
         this.retrieveLimit = Math.max(1, retrieveLimit);
     }
@@ -46,6 +50,14 @@ public class MemoryService {
     public List<MemoryHit> retrieveRelevantMemories(String query, UUID conversationId) {
         if (!enabled || !StringUtils.hasText(query) || conversationId == null) {
             return List.of();
+        }
+
+        List<MemoryHit> semanticHits = semanticEmbeddingService.embed(query)
+                .map(semanticEmbeddingService::toVectorLiteral)
+                .map(vector -> retrieveSemantic(vector, conversationId))
+                .orElseGet(List::of);
+        if (!semanticHits.isEmpty()) {
+            return semanticHits;
         }
 
         String vector = toVectorLiteral(embed(query));
@@ -91,12 +103,18 @@ public class MemoryService {
                 "sourceCount", sourceCount
         ));
         String vector = toVectorLiteral(embed(content));
+        String semanticVector = semanticEmbeddingService.embed(content)
+                .map(semanticEmbeddingService::toVectorLiteral)
+                .orElse(null);
 
         try {
             jdbcTemplate.update(
                     """
-                            INSERT INTO memory_items(id, conversation_id, message_id, kind, content, metadata_json, embedding, created_at)
-                            VALUES (?, ?, ?, ?, ?, ?, ?::vector, ?)
+                            INSERT INTO memory_items(
+                                id, conversation_id, message_id, kind, content, metadata_json, embedding,
+                                semantic_embedding, embedding_model, created_at
+                            )
+                            VALUES (?, ?, ?, ?, ?, ?, ?::vector, ?::vector, ?, ?)
                             """,
                     UUID.randomUUID(),
                     conversationId,
@@ -105,10 +123,37 @@ public class MemoryService {
                     content,
                     metadata,
                     vector,
+                    semanticVector,
+                    semanticVector == null ? null : semanticEmbeddingService.modelName(),
                     Instant.now()
             );
         } catch (DataAccessException ignored) {
             // Memory is an enhancement. Chat should still work if pgvector is unavailable.
+        }
+    }
+
+    private List<MemoryHit> retrieveSemantic(String vector, UUID conversationId) {
+        try {
+            return jdbcTemplate.query(
+                    """
+                            SELECT id, content, GREATEST(0, 1 - (semantic_embedding <=> ?::vector)) AS score
+                            FROM memory_items
+                            WHERE invalidated_at IS NULL
+                              AND semantic_embedding IS NOT NULL
+                              AND (conversation_id = ? OR conversation_id IS NULL)
+                            ORDER BY semantic_embedding <=> ?::vector
+                            LIMIT ?
+                            """,
+                    ps -> {
+                        ps.setString(1, vector);
+                        ps.setObject(2, conversationId);
+                        ps.setString(3, vector);
+                        ps.setInt(4, retrieveLimit);
+                    },
+                    (rs, rowNum) -> toMemoryHit(rs)
+            );
+        } catch (DataAccessException ex) {
+            return List.of();
         }
     }
 

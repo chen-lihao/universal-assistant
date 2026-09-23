@@ -12,8 +12,13 @@ contextBridge.exposeInMainWorld('assistant', {
   setPetState: (state: PetState) => ipcRenderer.invoke('assistant:set-pet-state', state),
   setPetPointerActive: (active: boolean) => ipcRenderer.invoke('assistant:set-pet-pointer-active', active),
   showPetMenu: () => ipcRenderer.invoke('assistant:show-pet-menu'),
-  performPetMotion: (payload: { type?: string; rangeX?: number; rangeY?: number; duration?: number; force?: boolean }) =>
-    ipcRenderer.invoke('assistant:perform-pet-motion', payload),
+  performPetMotion: (payload: {
+    type?: string
+    rangeX?: number
+    rangeY?: number
+    duration?: number
+    force?: boolean
+  }) => ipcRenderer.invoke('assistant:perform-pet-motion', payload),
   movePetBy: (payload: { deltaX: number; deltaY: number }) => ipcRenderer.invoke('assistant:move-pet-by', payload),
   onPetState: (callback: (state: PetState) => void) => {
     const listener = (_event: IpcRendererEvent, state: PetState) => callback(state)
@@ -31,7 +36,8 @@ contextBridge.exposeInMainWorld('assistant', {
     select: (options?: { directory?: boolean; multiple?: boolean }) => ipcRenderer.invoke('file:select', options),
     readText: (filePath: string) => ipcRenderer.invoke('file:read-text', filePath),
     writeText: (payload: { filePath: string; content: string }) => ipcRenderer.invoke('file:write-text', payload),
-    saveTextAs: (payload: { defaultPath?: string; content: string }) => ipcRenderer.invoke('file:save-text-as', payload),
+    saveTextAs: (payload: { defaultPath?: string; content: string }) =>
+      ipcRenderer.invoke('file:save-text-as', payload),
     convertText: (payload: { filePath: string; targetFormat: string }) =>
       ipcRenderer.invoke('file:convert-text', payload),
   },

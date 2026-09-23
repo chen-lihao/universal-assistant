@@ -11,13 +11,7 @@ export type SearchResult = {
 }
 
 export type MessageBlock =
-  | MarkdownBlock
-  | ExecutionBlock
-  | SourcesBlock
-  | StatusBlock
-  | ErrorBlock
-  | ToolCallBlock
-  | ToolResultBlock
+  MarkdownBlock | ExecutionBlock | SourcesBlock | StatusBlock | ErrorBlock | ToolCallBlock | ToolResultBlock
 
 export type MarkdownBlock = {
   id: string

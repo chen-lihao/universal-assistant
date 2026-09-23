@@ -1,5 +1,8 @@
 package com.hao.universalassistantbackend.service;
 
+import com.hao.universalassistantbackend.agent.AgentPolicy;
+import com.hao.universalassistantbackend.context.ContextAssembler;
+import com.hao.universalassistantbackend.context.ContextRequest;
 import com.hao.universalassistantbackend.entity.ConversationEntity;
 import com.hao.universalassistantbackend.entity.MessageEntity;
 import com.hao.universalassistantbackend.model.AgentMode;
@@ -16,6 +19,10 @@ import com.hao.universalassistantbackend.model.SearchResult;
 import com.hao.universalassistantbackend.model.WeatherPlan;
 import com.hao.universalassistantbackend.model.WeatherQuery;
 import com.hao.universalassistantbackend.model.WeatherReport;
+import com.hao.universalassistantbackend.rag.KnowledgeHit;
+import com.hao.universalassistantbackend.rag.KnowledgeService;
+import com.hao.universalassistantbackend.skill.ActiveSkill;
+import com.hao.universalassistantbackend.skill.SkillService;
 import com.hao.universalassistantbackend.tools.WeatherTools;
 import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatOptions;
 import org.springframework.ai.chat.client.ChatClient;
@@ -86,6 +93,10 @@ public class ChatService {
     private final WeatherQueryPlanner weatherQueryPlanner;
     private final PendingAgentActionService pendingAgentActionService;
     private final MessageBlockFactory messageBlockFactory;
+    private final AgentPolicy agentPolicy;
+    private final ContextAssembler contextAssembler;
+    private final KnowledgeService knowledgeService;
+    private final SkillService skillService;
     private final String dashScopeApiKey;
     private final int maxTokens;
 
@@ -98,6 +109,10 @@ public class ChatService {
                        WeatherQueryPlanner weatherQueryPlanner,
                        PendingAgentActionService pendingAgentActionService,
                        MessageBlockFactory messageBlockFactory,
+                       AgentPolicy agentPolicy,
+                       ContextAssembler contextAssembler,
+                       KnowledgeService knowledgeService,
+                       SkillService skillService,
                        @Value("${spring.ai.dashscope.api-key:}") String dashScopeApiKey,
                        @Value("${assistant.chat.max-tokens:2400}") int maxTokens) {
         this.chatClientProvider = chatClientProvider;
@@ -109,6 +124,10 @@ public class ChatService {
         this.weatherQueryPlanner = weatherQueryPlanner;
         this.pendingAgentActionService = pendingAgentActionService;
         this.messageBlockFactory = messageBlockFactory;
+        this.agentPolicy = agentPolicy;
+        this.contextAssembler = contextAssembler;
+        this.knowledgeService = knowledgeService;
+        this.skillService = skillService;
         this.dashScopeApiKey = dashScopeApiKey;
         this.maxTokens = maxTokens;
     }
@@ -120,6 +139,7 @@ public class ChatService {
             WeatherReport weatherReport,
             List<SearchResult> sources,
             List<MemoryHit> memories,
+            List<ActiveSkill> skills,
             String plan
     ) {
     }
@@ -248,6 +268,7 @@ public class ChatService {
                             agentContext.sources(),
                             agentContext.weatherReport(),
                             agentContext.memories(),
+                            agentContext.skills(),
                             agentContext.plan(),
                             selectedModel
                     ))
@@ -456,6 +477,7 @@ public class ChatService {
                             agentContext.sources(),
                             agentContext.weatherReport(),
                             agentContext.memories(),
+                            agentContext.skills(),
                             agentContext.plan(),
                             selectedModel
                     ))
@@ -749,7 +771,17 @@ public class ChatService {
                             .maxToken(maxTokens)
                             .build())
                     .tools(weatherTools)
-                    .user(buildUserPrompt(promptMessage, conversationSummary, history, sources, null, memories, "", selectedModel))
+                    .user(buildUserPrompt(
+                            promptMessage,
+                            conversationSummary,
+                            history,
+                            sources,
+                            null,
+                            memories,
+                            skillService.selectRelevant(promptMessage),
+                            "",
+                            selectedModel
+                    ))
                     .stream()
                     .chatResponse()
                     .map(this::extractStreamContent)
@@ -777,7 +809,24 @@ public class ChatService {
             String answer = StringUtils.hasText(streamedAnswer.toString())
                     ? streamedAnswer.toString()
                     : fallbackAnswer(null, sources, true);
-            answer = applyReflectionIfNeeded(answer, message, new PreparedAgentContext(context, context.mode(), approved, null, sources, memories, ""), chatClient, selectedModel, true, consumer);
+            answer = applyReflectionIfNeeded(
+                    answer,
+                    message,
+                    new PreparedAgentContext(
+                            context,
+                            context.mode(),
+                            approved,
+                            null,
+                            sources,
+                            memories,
+                            skillService.selectRelevant(message),
+                            ""
+                    ),
+                    chatClient,
+                    selectedModel,
+                    true,
+                    consumer
+            );
             agentRunService.updateProgress(context, answer, approved, true, sources);
             MessageEntity savedMessage = saveAssistantMessageAndFinalize(conversation, answer, selectedModel, approved, true, sources, context, message);
             emit(consumer, ChatStreamEvent.meta(selectedModel, approved, true, sources, conversation.getId(), savedMessage.getId(), context.run().getUserMessageId(), context.run().getId()));
@@ -830,7 +879,7 @@ public class ChatService {
         boolean weatherIntent = shouldUseWeatherTool(message) || weatherPlan.weatherIntent();
         SearchDecision searchDecision = decideSearchNeed(message, history, chatClient, selectedModel);
         boolean useSearch = Boolean.TRUE.equals(requestedSearch) || (!weatherIntent && searchDecision.needsSearch());
-        AgentMode mode = selectAgentMode(message, weatherIntent, useSearch);
+        AgentMode mode = agentPolicy.selectMode(message, weatherIntent, useSearch);
         AgentRunContext runContext = agentRunService.startRun(conversation, userMessage, mode, message, selectedModel);
         agentRunService.updateProgress(runContext, "", useSearch, modelAvailable, List.of());
         if (consumer != null) {
@@ -847,6 +896,54 @@ public class ChatService {
         );
 
         List<SearchResult> sources = new ArrayList<>();
+        List<ActiveSkill> activeSkills = skillService.selectRelevant(message);
+        for (ActiveSkill skill : activeSkills) {
+            AgentStepResponse skillStep = addAgentStep(
+                    runContext,
+                    "skill",
+                    "激活 Skill：" + skill.name(),
+                    skill.description(),
+                    "completed",
+                    consumer
+            );
+            agentRunService.recordToolCall(
+                    runContext,
+                    skillStep,
+                    "read_skill",
+                    Map.of("name", skill.name()),
+                    "已加载 Skill 指令，可用工具：" + String.join("、", skill.allowedTools()),
+                    "completed",
+                    Instant.now()
+            );
+        }
+
+        List<KnowledgeHit> knowledgeHits = knowledgeService.search(message);
+        if (!knowledgeHits.isEmpty()) {
+            knowledgeHits.stream().map(KnowledgeHit::toSearchResult).forEach(sources::add);
+            String knowledgeSummary = knowledgeHits.stream()
+                    .map(hit -> "- " + hit.title() + "：" + trimForPrompt(hit.content(), 260))
+                    .reduce((left, right) -> left + "\n" + right)
+                    .orElse("");
+            AgentStepResponse knowledgeStep = addAgentStep(
+                    runContext,
+                    "retrieval",
+                    "检索本地知识库",
+                    knowledgeSummary,
+                    "completed",
+                    consumer
+            );
+            agentRunService.recordToolCall(
+                    runContext,
+                    knowledgeStep,
+                    "knowledge_search",
+                    Map.of("query", message, "limit", knowledgeHits.size()),
+                    knowledgeSummary,
+                    "completed",
+                    Instant.now()
+            );
+            emitSourcesMeta(runContext, useSearch, modelAvailable, sources, consumer);
+        }
+
         List<MemoryHit> memories = memoryService.retrieveRelevantMemories(message, conversation.getId());
         if (!memories.isEmpty()) {
             AgentStepResponse memoryStep = addAgentStep(
@@ -917,6 +1014,7 @@ public class ChatService {
                 weatherReport,
                 finalSources,
                 memories,
+                activeSkills,
                 plan
         );
     }
@@ -2267,88 +2365,23 @@ public class ChatService {
                                    List<SearchResult> sources,
                                    WeatherReport weatherReport,
                                    List<MemoryHit> memories,
+                                   List<ActiveSkill> skills,
                                    String plan,
                                    String selectedModel) {
-        StringBuilder prompt = new StringBuilder();
-
-        prompt.append("Runtime model metadata:\n")
-                .append("Provider: ")
-                .append(MODEL_PROVIDER)
-                .append('\n')
-                .append("Model ID: ")
-                .append(selectedModel)
-                .append('\n')
-                .append("Model display name: ")
-                .append(modelDisplayName(selectedModel))
-                .append('\n')
-                .append("Integration: ")
-                .append(MODEL_INTEGRATION)
-                .append('\n')
-                .append("If the user asks what model you are using, answer based only on this runtime model metadata. ")
-                .append("Do not repeat conflicting model identity claims from conversation history.\n\n");
-
-        if (StringUtils.hasText(conversationSummary)) {
-            prompt.append("Conversation summary:\n")
-                    .append(conversationSummary)
-                    .append("\n\n");
-        }
-
-        if (history != null && !history.isEmpty()) {
-            prompt.append("Recent conversation:\n");
-            int fromIndex = Math.max(0, history.size() - 8);
-            history.stream()
-                    .skip(fromIndex)
-                    .filter(item -> item != null && StringUtils.hasText(item.content()))
-                    .forEach(item -> prompt
-                            .append("- ")
-                            .append(StringUtils.hasText(item.role()) ? item.role() : "unknown")
-                            .append(": ")
-                            .append(item.content())
-                            .append('\n'));
-            prompt.append('\n');
-        }
-
-        if (memories != null && !memories.isEmpty()) {
-            prompt.append("Relevant long-term memories:\n")
-                    .append(summarizeMemories(memories))
-                    .append("\n\n");
-        }
-
-        if (StringUtils.hasText(plan)) {
-            prompt.append("Plan-and-Solve plan:\n")
-                    .append(plan)
-                    .append("\nUse this plan to structure the work, but do not mechanically expose internal process unless it helps the user.\n\n");
-        }
-
-        if (!sources.isEmpty()) {
-            prompt.append("Search context:\n");
-            for (int i = 0; i < sources.size(); i++) {
-                SearchResult result = sources.get(i);
-                prompt.append(i + 1)
-                        .append(". ")
-                        .append(result.title())
-                        .append('\n')
-                        .append("URL: ")
-                        .append(result.url())
-                        .append('\n')
-                        .append("Snippet: ")
-                        .append(result.snippet())
-                        .append("\n\n");
-            }
-        }
-
-        if (weatherReport != null && StringUtils.hasText(weatherReport.context())) {
-            prompt.append("Tool context:\n")
-                    .append(weatherReport.context())
-                    .append('\n');
-            prompt.append("If the weather context contains multiple query results, cover every location/date result instead of only saying you will check it.\n");
-            if (!weatherReport.available() && !sources.isEmpty()) {
-                prompt.append("Weather tool status: unavailable. Use the search context as fallback if it contains relevant weather information, and explain that the direct weather service was unavailable.\n\n");
-            }
-        }
-
-        prompt.append("User question:\n").append(message);
-        return prompt.toString();
+        return contextAssembler.assemble(new ContextRequest(
+                message,
+                conversationSummary,
+                history,
+                sources == null ? List.of() : sources,
+                weatherReport,
+                memories == null ? List.of() : memories,
+                skills == null ? List.of() : skills,
+                plan,
+                selectedModel,
+                modelDisplayName(selectedModel),
+                MODEL_PROVIDER,
+                MODEL_INTEGRATION
+        ));
     }
 
     private String fallbackAnswerWithoutModel(List<SearchResult> sources) {

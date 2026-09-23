@@ -105,7 +105,11 @@ function normalizeMarkdown(content: string) {
 
       if (isHorizontalRule(line)) {
         pushBlankIfNeeded()
-      } else if ((isTableLine(line) || isTableSeparator(line)) && !isTableLine(previousLine()) && !isTableSeparator(previousLine())) {
+      } else if (
+        (isTableLine(line) || isTableSeparator(line)) &&
+        !isTableLine(previousLine()) &&
+        !isTableSeparator(previousLine())
+      ) {
         pushBlankIfNeeded()
       }
     }
@@ -202,7 +206,7 @@ const renderedContent = computed(() => DOMPurify.sanitize(markdown.render(normal
   border-radius: 6px;
   color: #0f172a;
   background: #eef2f8;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
   font-size: 0.92em;
 }
 
