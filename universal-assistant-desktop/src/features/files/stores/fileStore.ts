@@ -6,6 +6,7 @@ export const useFileStore = defineStore('file', () => {
   const selectedFilePath = ref('')
   const fileContent = ref('')
   const fileDirty = ref(false)
+  const fileErrorText = ref('')
   const targetFormat = ref('md')
 
   const showFilePanel = computed(() => filePanelOpen.value)
@@ -27,6 +28,7 @@ export const useFileStore = defineStore('file', () => {
     selectedFilePath,
     fileContent,
     fileDirty,
+    fileErrorText,
     targetFormat,
     showFilePanel,
     selectedFileName,

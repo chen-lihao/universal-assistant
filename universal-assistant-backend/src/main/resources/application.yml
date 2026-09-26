@@ -3,6 +3,10 @@ server:
 
 # application.yml
 spring:
+  servlet:
+    multipart:
+      max-file-size: 5MB
+      max-request-size: 6MB
   datasource:
     url: ${ASSISTANT_DB_URL:jdbc:postgresql://localhost:5432/universal_assistant}
     username: ${ASSISTANT_DB_USERNAME:assistant}

@@ -32,6 +32,14 @@ contextBridge.exposeInMainWorld('assistant', {
 
     return () => ipcRenderer.removeListener('assistant:pet-action', listener)
   },
+  onFirework: (callback: (payload: { startX: number; startY: number; burstX: number; burstY: number }) => void) => {
+    const listener = (
+      _event: IpcRendererEvent,
+      payload: { startX: number; startY: number; burstX: number; burstY: number },
+    ) => callback(payload)
+    ipcRenderer.on('assistant:firework', listener)
+    return () => ipcRenderer.removeListener('assistant:firework', listener)
+  },
   files: {
     select: (options?: { directory?: boolean; multiple?: boolean }) => ipcRenderer.invoke('file:select', options),
     readText: (filePath: string) => ipcRenderer.invoke('file:read-text', filePath),

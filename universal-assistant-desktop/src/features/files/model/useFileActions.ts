@@ -1,12 +1,9 @@
 import { storeToRefs } from 'pinia'
-import { useChatSessionStore } from '../../chat/stores/chatSessionStore'
 import { useFileStore } from '../stores/fileStore'
 
 export function useFileActions(options: { appendAssistantMessage: (content: string) => void }) {
-  const chatStore = useChatSessionStore()
   const fileStore = useFileStore()
-  const { errorText } = storeToRefs(chatStore)
-  const { filePanelOpen, selectedFilePath, fileContent, fileDirty, targetFormat, selectedFileName } =
+  const { filePanelOpen, selectedFilePath, fileContent, fileDirty, fileErrorText, targetFormat, selectedFileName } =
     storeToRefs(fileStore)
 
   async function selectFile() {
@@ -15,7 +12,7 @@ export function useFileActions(options: { appendAssistantMessage: (content: stri
     }
 
     filePanelOpen.value = true
-    errorText.value = ''
+    fileErrorText.value = ''
     const result = await window.assistant.files.select()
     if (result.canceled || result.paths.length === 0) {
       return
@@ -32,14 +29,14 @@ export function useFileActions(options: { appendAssistantMessage: (content: stri
 
     try {
       filePanelOpen.value = true
-      errorText.value = ''
+      fileErrorText.value = ''
       const result = await window.assistant.files.readText(selectedFilePath.value)
       fileContent.value = result.content
       fileDirty.value = false
       options.appendAssistantMessage(`已读取 ${result.name}，大小 ${Math.round(result.size / 1024)} KB。`)
     } catch (error) {
       filePanelOpen.value = true
-      errorText.value = error instanceof Error ? error.message : String(error)
+      fileErrorText.value = error instanceof Error ? error.message : String(error)
     }
   }
 
@@ -55,7 +52,7 @@ export function useFileActions(options: { appendAssistantMessage: (content: stri
 
     try {
       filePanelOpen.value = true
-      errorText.value = ''
+      fileErrorText.value = ''
       await window.assistant.files.writeText({
         filePath: selectedFilePath.value,
         content: fileContent.value,
@@ -64,7 +61,7 @@ export function useFileActions(options: { appendAssistantMessage: (content: stri
       options.appendAssistantMessage(`已保存 ${selectedFileName.value}。`)
     } catch (error) {
       filePanelOpen.value = true
-      errorText.value = error instanceof Error ? error.message : String(error)
+      fileErrorText.value = error instanceof Error ? error.message : String(error)
     }
   }
 
@@ -75,7 +72,7 @@ export function useFileActions(options: { appendAssistantMessage: (content: stri
 
     try {
       filePanelOpen.value = true
-      errorText.value = ''
+      fileErrorText.value = ''
       const result = await window.assistant.files.saveTextAs({
         defaultPath: selectedFilePath.value || undefined,
         content: fileContent.value,
@@ -87,7 +84,7 @@ export function useFileActions(options: { appendAssistantMessage: (content: stri
       }
     } catch (error) {
       filePanelOpen.value = true
-      errorText.value = error instanceof Error ? error.message : String(error)
+      fileErrorText.value = error instanceof Error ? error.message : String(error)
     }
   }
 
@@ -98,7 +95,7 @@ export function useFileActions(options: { appendAssistantMessage: (content: stri
 
     try {
       filePanelOpen.value = true
-      errorText.value = ''
+      fileErrorText.value = ''
       const result = await window.assistant.files.convertText({
         filePath: selectedFilePath.value,
         targetFormat: targetFormat.value,
@@ -110,7 +107,7 @@ export function useFileActions(options: { appendAssistantMessage: (content: stri
       )
     } catch (error) {
       filePanelOpen.value = true
-      errorText.value = error instanceof Error ? error.message : String(error)
+      fileErrorText.value = error instanceof Error ? error.message : String(error)
     }
   }
 

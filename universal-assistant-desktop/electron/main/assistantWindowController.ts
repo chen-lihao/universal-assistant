@@ -1,6 +1,7 @@
 import { BrowserWindow } from 'electron'
 import { registerAssistantIpcHandlers } from './assistantIpc'
 import { createChatWindowController } from './chatWindowController'
+import { createFireworkEffectController } from './fireworkEffectController'
 import { createPetWindowController } from './petWindowController'
 import { createAssistantWindowState } from './types'
 import { createWindowMotion } from './windowMotion'
@@ -49,6 +50,7 @@ export function createAssistantWindowController() {
   }
 
   const windowMotion = createWindowMotion({ beforeWindowChange: suppressMoveSyncFor })
+  const fireworkEffect = createFireworkEffectController()
 
   const chatControllerRef: { current?: ReturnType<typeof createChatWindowController> } = {}
   const petController = createPetWindowController({
@@ -56,6 +58,8 @@ export function createAssistantWindowController() {
     windowMotion,
     clearMoveSyncSuppressions,
     positionChatWindow: () => chatControllerRef.current?.positionChatWindow(),
+    launchFireworks: () => fireworkEffect.launch(state.petWindow),
+    onPetClosed: fireworkEffect.dispose,
   })
 
   const chatController = createChatWindowController({
@@ -90,6 +94,7 @@ export function createAssistantWindowController() {
   }
 
   function handleWindowAllClosed() {
+    fireworkEffect.dispose()
     state.petWindow = null
     state.chatWindow = null
   }

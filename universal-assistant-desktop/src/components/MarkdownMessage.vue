@@ -133,6 +133,9 @@ const renderedContent = computed(() => DOMPurify.sanitize(markdown.render(normal
 
 <style scoped>
 .markdown-message {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
   overflow-wrap: anywhere;
   color: inherit;
   font-size: 14px;
@@ -156,7 +159,7 @@ const renderedContent = computed(() => DOMPurify.sanitize(markdown.render(normal
 .markdown-message :deep(h2),
 .markdown-message :deep(h3) {
   margin: 12px 0 7px;
-  color: #111827;
+  color: var(--ua-ink);
   font-weight: 700;
   line-height: 1.28;
 }
@@ -184,7 +187,7 @@ const renderedContent = computed(() => DOMPurify.sanitize(markdown.render(normal
 }
 
 .markdown-message :deep(a) {
-  color: #2563eb;
+  color: var(--ua-primary-strong);
   text-decoration: none;
 }
 
@@ -195,17 +198,17 @@ const renderedContent = computed(() => DOMPurify.sanitize(markdown.render(normal
 .markdown-message :deep(blockquote) {
   margin: 10px 0;
   padding: 8px 12px;
-  border-left: 3px solid rgba(20, 184, 166, 0.42);
+  border-left: 3px solid var(--ua-companion);
   border-radius: 0 8px 8px 0;
-  color: #475569;
-  background: rgba(20, 184, 166, 0.08);
+  color: var(--ua-ink-soft);
+  background: var(--ua-companion-soft);
 }
 
 .markdown-message :deep(code) {
   padding: 2px 5px;
   border-radius: 6px;
-  color: #0f172a;
-  background: #eef2f8;
+  color: var(--ua-ink);
+  background: var(--ua-bg-deep);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
   font-size: 0.92em;
 }
@@ -214,7 +217,7 @@ const renderedContent = computed(() => DOMPurify.sanitize(markdown.render(normal
   overflow-x: auto;
   margin: 10px 0;
   padding: 11px 12px;
-  border: 1px solid rgba(103, 119, 150, 0.16);
+  border: 1px solid var(--ua-border);
   border-radius: 10px;
   background: #0f172a;
 }
@@ -230,8 +233,8 @@ const renderedContent = computed(() => DOMPurify.sanitize(markdown.render(normal
 .markdown-message :deep(table) {
   display: block;
   overflow-x: auto;
-  width: 100%;
-  min-width: min(520px, 100%);
+  width: max-content;
+  max-width: 100%;
   margin: 10px 0;
   border-collapse: collapse;
   border-spacing: 0;
@@ -241,17 +244,17 @@ const renderedContent = computed(() => DOMPurify.sanitize(markdown.render(normal
 .markdown-message :deep(th),
 .markdown-message :deep(td) {
   padding: 7px 9px;
-  border: 1px solid rgba(103, 119, 150, 0.2);
+  border: 1px solid var(--ua-border);
   text-align: left;
   vertical-align: top;
 }
 
 .markdown-message :deep(th) {
-  background: #f8fafc;
+  background: var(--ua-panel-soft);
   font-weight: 700;
 }
 
 .markdown-message :deep(tbody tr:nth-child(even)) {
-  background: rgba(248, 250, 252, 0.75);
+  background: var(--ua-bg);
 }
 </style>

@@ -12,6 +12,8 @@ export function createPetWindowController(options: {
   windowMotion: WindowMotion
   clearMoveSyncSuppressions: () => void
   positionChatWindow: () => void
+  launchFireworks: () => void
+  onPetClosed: () => void
 }) {
   const { state, windowMotion } = options
 
@@ -67,6 +69,13 @@ export function createPetWindowController(options: {
   function runPetMenuAction(action: PetAction) {
     sendPetAction(action)
 
+    if (action === 'fireworks') {
+      motion.cancelPetRoam()
+      motion.stopPetFollow()
+      state.petManualControlUntil = Date.now() + 2600
+      options.launchFireworks()
+    }
+
     if (action === 'jump' || action === 'run') {
       motion.setPetPointerActive(false)
       setTimeout(() => motion.performPetInteractionMotion(action), 30)
@@ -105,6 +114,7 @@ export function createPetWindowController(options: {
       onDidFinishLoad: sendCurrentPetState,
       onMove: syncChatWindowToPetWindow,
       onClosed: (window: BrowserWindow) => {
+        options.onPetClosed()
         motion.stopPetFollow()
         motion.cancelPetRoam()
         windowMotion.cancelWindowOpacityAnimation(window)

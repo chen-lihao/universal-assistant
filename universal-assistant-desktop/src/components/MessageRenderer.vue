@@ -131,6 +131,10 @@ const renderBlocks = computed<MessageBlock[]>(() => {
       <MarkdownMessage v-else-if="block.type === 'markdown' && block.content" :content="block.content" />
 
       <div v-else-if="block.type === 'sources' && block.items?.length" class="sources">
+        <div class="sources-heading">
+          <span>参考来源</span>
+          <small>{{ block.items.length }} 项</small>
+        </div>
         <a v-for="source in block.items" :key="source.url" :href="source.url" target="_blank" rel="noreferrer">
           <span>{{ source.title }}</span>
           <small>{{ sourceLabel(source) }}</small>
@@ -151,15 +155,18 @@ const renderBlocks = computed<MessageBlock[]>(() => {
 <style scoped>
 .message-renderer {
   display: grid;
-  gap: 10px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  min-width: 0;
 }
 
 .agent-steps {
+  min-width: 0;
   overflow: hidden;
-  border: 1px solid rgba(20, 184, 166, 0.25);
-  border-radius: 12px;
-  color: #334155;
-  background: rgba(240, 253, 250, 0.78);
+  border: 1px solid var(--ua-border);
+  border-radius: 6px;
+  color: var(--ua-ink-soft);
+  background: var(--ua-primary-soft);
 }
 
 .agent-steps summary {
@@ -167,8 +174,8 @@ const renderBlocks = computed<MessageBlock[]>(() => {
   align-items: center;
   gap: 8px;
   padding: 9px 12px;
-  border-bottom: 1px solid rgba(20, 184, 166, 0.16);
-  color: #0f766e;
+  border-bottom: 1px solid var(--ua-border);
+  color: var(--ua-primary-strong);
   cursor: default;
   list-style: none;
 }
@@ -181,9 +188,14 @@ const renderBlocks = computed<MessageBlock[]>(() => {
   font-weight: 700;
 }
 
+.agent-steps summary b {
+  font-size: 11px;
+  font-weight: 600;
+}
+
 .agent-steps summary small {
   margin-left: auto;
-  color: #64748b;
+  color: var(--ua-muted);
   font-size: 11px;
 }
 
@@ -201,7 +213,7 @@ const renderBlocks = computed<MessageBlock[]>(() => {
 }
 
 .agent-steps li.failed strong {
-  color: #dc2626;
+  color: var(--ua-danger);
 }
 
 .agent-steps li div {
@@ -212,19 +224,19 @@ const renderBlocks = computed<MessageBlock[]>(() => {
 }
 
 .agent-steps li strong {
-  color: #1f2937;
+  color: var(--ua-ink);
   font-size: 13px;
 }
 
 .agent-steps li small {
   flex: none;
-  color: #64748b;
+  color: var(--ua-muted);
   font-size: 11px;
 }
 
 .agent-steps li p {
   margin: 4px 0 0;
-  color: #475569;
+  color: var(--ua-ink-soft);
   font-size: 12px;
   line-height: 1.55;
   white-space: pre-wrap;
@@ -232,41 +244,82 @@ const renderBlocks = computed<MessageBlock[]>(() => {
 
 .sources {
   display: grid;
-  gap: 4px;
+  grid-template-columns: repeat(auto-fit, minmax(min(210px, 100%), 1fr));
+  gap: 6px;
+}
+
+.sources-heading {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 2px 3px;
+  color: var(--ua-ink-soft);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.sources-heading::before {
+  content: '';
+  width: 18px;
+  height: 2px;
+  margin-right: 7px;
+  background: var(--ua-sakura);
+}
+
+.sources-heading span {
+  margin-right: auto;
+}
+
+.sources-heading small {
+  color: var(--ua-muted);
+  font-size: 10px;
+  font-weight: 600;
 }
 
 .sources a {
   display: grid;
   gap: 2px;
-  color: #2563eb;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--ua-border);
+  border-radius: 6px;
+  color: var(--ua-primary-strong);
+  background: var(--ua-panel-soft);
   font-size: 12px;
   text-decoration: none;
   user-select: text;
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    transform 160ms ease;
 }
 
 .sources a small {
-  color: #64748b;
+  color: var(--ua-muted);
   font-size: 11px;
 }
 
 .sources a:hover {
-  text-decoration: underline;
+  border-color: var(--ua-primary);
+  background: var(--ua-primary-soft);
+  transform: translateY(-1px);
 }
 
 .status-block,
 .error-block {
   padding: 8px 10px;
-  border-radius: 10px;
+  border-radius: 8px;
   font-size: 12px;
 }
 
 .status-block {
-  color: #475569;
-  background: #f1f5f9;
+  color: var(--ua-ink-soft);
+  background: var(--ua-bg-deep);
 }
 
 .error-block {
-  color: #991b1b;
-  background: #fef2f2;
+  color: var(--ua-danger);
+  background: var(--ua-danger-soft);
 }
 </style>

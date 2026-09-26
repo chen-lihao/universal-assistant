@@ -1,12 +1,8 @@
 import { onMounted, onUnmounted, ref } from 'vue'
-import type { FireworkParticle, ParticleStyle } from './types'
 
 export function usePetAvatar() {
   const petState = ref<PetState>('idle')
   const petAction = ref<PetAction | null>(null)
-  const particles = ref<FireworkParticle[]>([])
-  const rocketVisible = ref(false)
-  const burstActive = ref(false)
   const isClicking = ref(false)
   const isDragging = ref(false)
   const isHovering = ref(false)
@@ -18,8 +14,6 @@ export function usePetAvatar() {
   let idleTimer: number | undefined
   let transientStateTimer: number | undefined
   let actionTimer: number | undefined
-  let rocketTimer: number | undefined
-  let particleTimer: number | undefined
   let menuReleaseTimer: number | undefined
   let dragFrame: number | undefined
   let dragPointerId: number | undefined
@@ -32,7 +26,12 @@ export function usePetAvatar() {
   let dragMoved = false
 
   function canUseInteractiveState() {
-    return petState.value !== 'thinking' && petState.value !== 'speaking' && petState.value !== 'error'
+    return (
+      petAction.value === null &&
+      petState.value !== 'thinking' &&
+      petState.value !== 'speaking' &&
+      petState.value !== 'error'
+    )
   }
 
   function setPetState(state: PetState) {
@@ -41,12 +40,7 @@ export function usePetAvatar() {
 
   function clearAction() {
     window.clearTimeout(actionTimer)
-    window.clearTimeout(rocketTimer)
-    window.clearTimeout(particleTimer)
     petAction.value = null
-    particles.value = []
-    rocketVisible.value = false
-    burstActive.value = false
   }
 
   function finishAction(duration = 1200) {
@@ -60,54 +54,6 @@ export function usePetAvatar() {
       }
       scheduleIdleMood()
     }, duration)
-  }
-
-  function launchFireworks() {
-    rocketVisible.value = true
-    burstActive.value = false
-    particles.value = []
-    window.clearTimeout(rocketTimer)
-    window.clearTimeout(particleTimer)
-
-    rocketTimer = window.setTimeout(() => {
-      const colors = ['#38bdf8', '#34d399', '#fbbf24', '#fb7185', '#a78bfa', '#f472b6', '#fde047']
-      const nextParticles: FireworkParticle[] = []
-      for (let ring = 0; ring < 2; ring += 1) {
-        const count = ring === 0 ? 18 : 28
-        const baseDistance = ring === 0 ? 72 : 122
-        for (let i = 0; i < count; i += 1) {
-          const angle = (Math.PI * 2 * i) / count + ring * 0.08
-          const distance = baseDistance + Math.random() * 24
-          nextParticles.push({
-            id: Date.now() + ring * 100 + i,
-            x: Math.cos(angle) * distance,
-            y: Math.sin(angle) * distance,
-            color: colors[(i + ring) % colors.length],
-            delay: Math.random() * 130,
-            size: ring === 0 ? 8 : 6,
-          })
-        }
-      }
-
-      rocketVisible.value = false
-      burstActive.value = true
-      particles.value = nextParticles
-    }, 720)
-
-    particleTimer = window.setTimeout(() => {
-      particles.value = []
-      burstActive.value = false
-    }, 2200)
-  }
-
-  function particleStyle(particle: FireworkParticle): ParticleStyle {
-    return {
-      '--tx': `${particle.x}px`,
-      '--ty': `${particle.y}px`,
-      '--particle-color': particle.color,
-      '--particle-delay': `${particle.delay}ms`,
-      '--particle-size': `${particle.size}px`,
-    }
   }
 
   function runPetAction(action: PetAction) {
@@ -135,7 +81,6 @@ export function usePetAvatar() {
 
     if (action === 'fireworks') {
       setPetState('happy')
-      launchFireworks()
       finishAction(2400)
       return
     }
@@ -360,8 +305,6 @@ export function usePetAvatar() {
     window.clearTimeout(idleTimer)
     window.clearTimeout(transientStateTimer)
     window.clearTimeout(actionTimer)
-    window.clearTimeout(rocketTimer)
-    window.clearTimeout(particleTimer)
     window.clearTimeout(menuReleaseTimer)
     if (dragFrame !== undefined) {
       window.cancelAnimationFrame(dragFrame)
@@ -371,12 +314,8 @@ export function usePetAvatar() {
   return {
     petState,
     petAction,
-    particles,
-    rocketVisible,
-    burstActive,
     isClicking,
     isDragging,
-    particleStyle,
     startDrag,
     moveDrag,
     finishDrag,

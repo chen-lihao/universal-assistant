@@ -27,6 +27,13 @@ export function createPetMotionController(options: {
 }) {
   const { state, windowMotion } = options
 
+  function safeWaypoint(pet: Rectangle, workArea: Rectangle, x: number, y: number): WindowPoint {
+    return {
+      x: Math.round(clamp(x, workArea.x + WINDOW_GAP, workArea.x + workArea.width - pet.width - WINDOW_GAP)),
+      y: Math.round(clamp(y, workArea.y + WINDOW_GAP, workArea.y + workArea.height - pet.height - WINDOW_GAP)),
+    }
+  }
+
   function clearPetRoamTimer() {
     if (state.petRoamTimer) {
       clearTimeout(state.petRoamTimer)
@@ -285,9 +292,9 @@ export function createPetMotionController(options: {
       windowMotion.animateWindowPath(
         state.petWindow,
         [
-          { x: start.x + direction * 18, y: start.y - 14, duration: 140 },
+          { ...safeWaypoint(start, workArea, start.x + direction * 18, start.y - 14), duration: 140 },
           { x: targetX, y: targetY, duration: 640 },
-          { x: targetX - direction * 18, y: targetY + 8, duration: 220 },
+          { ...safeWaypoint(start, workArea, targetX - direction * 18, targetY + 8), duration: 220 },
         ],
         () => finish('happy', 700),
       )
@@ -321,8 +328,12 @@ export function createPetMotionController(options: {
     const duration = Math.round(randomBetween(ROAM_MIN_DURATION_MS, ROAM_MAX_DURATION_MS))
     const liftY = target.y < start.y ? -14 : 10
     const midPoint = {
-      x: Math.round(start.x + (target.x - start.x) * 0.42),
-      y: Math.round(start.y + (target.y - start.y) * 0.42 + liftY),
+      ...safeWaypoint(
+        start,
+        screen.getDisplayMatching(start).workArea,
+        start.x + (target.x - start.x) * 0.42,
+        start.y + (target.y - start.y) * 0.42 + liftY,
+      ),
     }
 
     options.setPetState('running')
@@ -451,9 +462,9 @@ export function createPetMotionController(options: {
       windowMotion.animateWindowPath(
         state.petWindow,
         [
-          { x: start.x + direction * 28, y: peakY, duration: 260 },
+          { ...safeWaypoint(start, workArea, start.x + direction * 28, peakY), duration: 260 },
           { x: targetX, y: targetY, duration: 430 },
-          { x: targetX - direction * 6, y: targetY + 4, duration: 120 },
+          { ...safeWaypoint(start, workArea, targetX - direction * 6, targetY + 4), duration: 120 },
         ],
         () => {
           options.setPetState('happy')
@@ -479,9 +490,9 @@ export function createPetMotionController(options: {
     windowMotion.animateWindowPath(
       state.petWindow,
       [
-        { x: start.x + direction * 24, y: start.y - 12, duration: 120 },
+        { ...safeWaypoint(start, workArea, start.x + direction * 24, start.y - 12), duration: 120 },
         { x: targetX, y: targetY, duration: 560 },
-        { x: targetX - direction * 12, y: targetY + 6, duration: 180 },
+        { ...safeWaypoint(start, workArea, targetX - direction * 12, targetY + 6), duration: 180 },
       ],
       () => {
         options.setPetState('happy')

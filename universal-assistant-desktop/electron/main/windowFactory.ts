@@ -26,7 +26,7 @@ function createWindowOptions() {
   }
 }
 
-function rendererUrl(view: 'pet' | 'chat') {
+function rendererUrl(view: 'pet' | 'chat' | 'effects') {
   if (VITE_DEV_SERVER_URL) {
     return `${VITE_DEV_SERVER_URL}?view=${view}`
   }
@@ -37,7 +37,7 @@ function rendererUrl(view: 'pet' | 'chat') {
   }
 }
 
-function loadRenderer(window: BrowserWindow, view: 'pet' | 'chat') {
+function loadRenderer(window: BrowserWindow, view: 'pet' | 'chat' | 'effects') {
   const target = rendererUrl(view)
 
   if (typeof target === 'string') {
@@ -124,6 +124,30 @@ export function createPetBrowserWindow(handlers: {
   return window
 }
 
+export function createEffectsBrowserWindow(onDidFinishLoad: () => void) {
+  const window = new BrowserWindow({
+    width: 440,
+    height: 370,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    focusable: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    hasShadow: false,
+    backgroundColor: '#00000000',
+    show: false,
+    ...createWindowOptions(),
+  })
+
+  window.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+  window.setAlwaysOnTop(true, 'floating')
+  window.setIgnoreMouseEvents(true, { forward: true })
+  window.webContents.once('did-finish-load', onDidFinishLoad)
+  loadRenderer(window, 'effects')
+  return window
+}
+
 export function createChatBrowserWindow(handlers: {
   onShow: () => void
   onHide: () => void
@@ -141,7 +165,7 @@ export function createChatBrowserWindow(handlers: {
     transparent: false,
     resizable: true,
     show: false,
-    backgroundColor: '#f7f5ef',
+    backgroundColor: '#f7f6fb',
     title: 'Universal Assistant',
     ...createWindowOptions(),
   })

@@ -79,7 +79,28 @@ public class SkillService {
                 score += Math.min(8, term.length());
             }
         }
-        return score;
+        return score + intentScore(metadata.getName(), haystack);
+    }
+
+    private int intentScore(String skillName, String message) {
+        return switch (skillName) {
+            case "resume-review" -> containsAny(message, "简历", "履历") ? 24 : 0;
+            case "resume-tailoring" -> containsAny(message, "简历", "履历")
+                    ? (containsAny(message, "修改", "优化", "定制", "改写", "润色") ? 32 : 20)
+                    : 0;
+            case "mock-interview" -> containsAny(message, "面试", "面经", "回答练习") ? 40 : 0;
+            case "company-research" -> containsAny(message, "公司调研", "企业调研", "行业调研", "公司背景") ? 36 : 0;
+            default -> 0;
+        };
+    }
+
+    private boolean containsAny(String value, String... candidates) {
+        for (String candidate : candidates) {
+            if (value.contains(candidate)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private Set<String> terms(String value) {
@@ -93,7 +114,10 @@ public class SkillService {
                 terms.add(token);
             }
         }
-        List<String> chineseKeywords = List.of("天气", "预报", "行程", "检索", "搜索", "实时", "网页", "文件", "转换", "编辑", "知识库", "文档", "资料", "问答");
+        List<String> chineseKeywords = List.of(
+                "天气", "预报", "行程", "检索", "搜索", "实时", "网页", "文件", "转换", "编辑", "知识库", "文档", "资料", "问答",
+                "简历", "求职", "岗位", "职位", "面试", "项目经历", "工作经历", "公司研究"
+        );
         for (String keyword : chineseKeywords) {
             if (normalized.contains(keyword)) {
                 terms.add(keyword);

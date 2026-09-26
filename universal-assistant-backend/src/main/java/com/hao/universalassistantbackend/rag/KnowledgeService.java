@@ -15,6 +15,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -40,19 +41,22 @@ public class KnowledgeService {
     private final SemanticEmbeddingService embeddingService;
     private final boolean enabled;
     private final int retrieveLimit;
+    private final double minSemanticSimilarity;
 
     public KnowledgeService(JdbcTemplate jdbcTemplate,
                             ObjectMapper objectMapper,
                             TextChunker textChunker,
                             SemanticEmbeddingService embeddingService,
                             @Value("${assistant.rag.enabled:true}") boolean enabled,
-                            @Value("${assistant.rag.retrieve-limit:5}") int retrieveLimit) {
+                            @Value("${assistant.rag.retrieve-limit:5}") int retrieveLimit,
+                            @Value("${assistant.rag.min-semantic-similarity:0.55}") double minSemanticSimilarity) {
         this.jdbcTemplate = jdbcTemplate;
         this.objectMapper = objectMapper;
         this.textChunker = textChunker;
         this.embeddingService = embeddingService;
         this.enabled = enabled;
         this.retrieveLimit = Math.max(1, retrieveLimit);
+        this.minSemanticSimilarity = Math.max(0, Math.min(1, minSemanticSimilarity));
     }
 
     @Transactional
@@ -98,8 +102,8 @@ public class KnowledgeService {
                 content,
                 contentHash,
                 metadataJson,
-                now,
-                now
+                timestamp(now),
+                timestamp(now)
         );
 
         List<float[]> embeddings = embeddingService.embedAll(chunks);
@@ -110,29 +114,32 @@ public class KnowledgeService {
 
         jdbcTemplate.update(
                 "UPDATE knowledge_documents SET status = 'ready', chunk_count = ?, updated_at = ? WHERE id = ?",
-                chunks.size(), Instant.now(), documentId
+                chunks.size(), timestamp(Instant.now()), documentId
         );
-        return getDocument(documentId)
+        return getDocument(documentId, knowledgeBaseId)
                 .map(detail -> new KnowledgeDocumentResponse(
                         detail.id(), detail.knowledgeBaseId(), detail.title(), detail.sourceUri(), detail.status(), chunks.size(), detail.createdAt(), detail.updatedAt()))
                 .orElseThrow();
     }
 
-    public List<KnowledgeHit> search(String query) {
-        if (!enabled || !StringUtils.hasText(query) || !hasReadyDocuments()) {
+    public List<KnowledgeHit> search(String query, UUID knowledgeBaseId) {
+        if (knowledgeBaseId == null) {
+            throw new IllegalArgumentException("检索知识库时必须指定 knowledgeBaseId。");
+        }
+        if (!enabled || !StringUtils.hasText(query) || !hasReadyDocuments(knowledgeBaseId)) {
             return List.of();
         }
 
         int candidateLimit = Math.max(retrieveLimit * 3, 10);
         List<RankedHit> semantic = embeddingService.embed(query)
-                .map(vector -> semanticSearch(embeddingService.toVectorLiteral(vector), candidateLimit))
+                .map(vector -> semanticSearch(embeddingService.toVectorLiteral(vector), knowledgeBaseId, candidateLimit))
                 .orElseGet(List::of);
-        List<RankedHit> lexical = lexicalSearch(query, candidateLimit);
+        List<RankedHit> lexical = lexicalSearch(query, knowledgeBaseId, candidateLimit);
         return reciprocalRankFusion(semantic, lexical, retrieveLimit);
     }
 
-    public List<KnowledgeDocumentResponse> listDocuments() {
-        if (!enabled) {
+    public List<KnowledgeDocumentResponse> listDocuments(UUID knowledgeBaseId) {
+        if (!enabled || knowledgeBaseId == null) {
             return List.of();
         }
         try {
@@ -140,9 +147,11 @@ public class KnowledgeService {
                     """
                             SELECT id, knowledge_base_id, title, source_uri, status, chunk_count, created_at, updated_at
                             FROM knowledge_documents
+                            WHERE knowledge_base_id = ?
                             ORDER BY updated_at DESC
                             LIMIT 100
                             """,
+                    ps -> ps.setObject(1, knowledgeBaseId),
                     (rs, rowNum) -> toDocumentResponse(rs)
             );
         } catch (DataAccessException ex) {
@@ -150,8 +159,8 @@ public class KnowledgeService {
         }
     }
 
-    public Optional<KnowledgeDocumentDetail> getDocument(UUID documentId) {
-        if (!enabled || documentId == null) {
+    public Optional<KnowledgeDocumentDetail> getDocument(UUID documentId, UUID knowledgeBaseId) {
+        if (!enabled || documentId == null || knowledgeBaseId == null) {
             return Optional.empty();
         }
         try {
@@ -160,9 +169,12 @@ public class KnowledgeService {
                             SELECT id, knowledge_base_id, title, source_uri, full_content, metadata_json,
                                    status, created_at, updated_at
                             FROM knowledge_documents
-                            WHERE id = ?
+                            WHERE id = ? AND knowledge_base_id = ?
                             """,
-                    ps -> ps.setObject(1, documentId),
+                    ps -> {
+                        ps.setObject(1, documentId);
+                        ps.setObject(2, knowledgeBaseId);
+                    },
                     rs -> rs.next() ? Optional.of(toDocumentDetail(rs)) : Optional.empty()
             );
         } catch (DataAccessException ex) {
@@ -170,11 +182,12 @@ public class KnowledgeService {
         }
     }
 
-    private boolean hasReadyDocuments() {
+    private boolean hasReadyDocuments(UUID knowledgeBaseId) {
         try {
             Integer count = jdbcTemplate.queryForObject(
-                    "SELECT COUNT(*) FROM knowledge_documents WHERE status = 'ready'",
-                    Integer.class
+                    "SELECT COUNT(*) FROM knowledge_documents WHERE status = 'ready' AND knowledge_base_id = ?",
+                    Integer.class,
+                    knowledgeBaseId
             );
             return count != null && count > 0;
         } catch (DataAccessException ex) {
@@ -211,7 +224,7 @@ public class KnowledgeService {
                                 id, document_id, chunk_index, content, metadata_json, embedding_model, created_at
                             ) VALUES (?, ?, ?, ?, ?, ?, ?)
                             """,
-                    UUID.randomUUID(), documentId, chunkIndex, content, metadataJson, null, createdAt
+                    UUID.randomUUID(), documentId, chunkIndex, content, metadataJson, null, timestamp(createdAt)
             );
             return;
         }
@@ -223,11 +236,11 @@ public class KnowledgeService {
                         ) VALUES (?, ?, ?, ?, ?, ?::vector, ?, ?)
                         """,
                 UUID.randomUUID(), documentId, chunkIndex, content, metadataJson,
-                embeddingService.toVectorLiteral(embedding), embeddingService.modelName(), createdAt
+                embeddingService.toVectorLiteral(embedding), embeddingService.modelName(), timestamp(createdAt)
         );
     }
 
-    private List<RankedHit> semanticSearch(String vector, int limit) {
+    private List<RankedHit> semanticSearch(String vector, UUID knowledgeBaseId, int limit) {
         try {
             return jdbcTemplate.query(
                     """
@@ -237,13 +250,17 @@ public class KnowledgeService {
                             JOIN knowledge_documents d ON d.id = c.document_id
                             JOIN knowledge_bases b ON b.id = d.knowledge_base_id
                             WHERE c.embedding IS NOT NULL AND d.status = 'ready' AND b.enabled = TRUE
+                              AND b.id = ? AND (1 - (c.embedding <=> ?::vector)) >= ?
                             ORDER BY c.embedding <=> ?::vector
                             LIMIT ?
                             """,
                     ps -> {
                         ps.setString(1, vector);
-                        ps.setString(2, vector);
-                        ps.setInt(3, limit);
+                        ps.setObject(2, knowledgeBaseId);
+                        ps.setString(3, vector);
+                        ps.setDouble(4, minSemanticSimilarity);
+                        ps.setString(5, vector);
+                        ps.setInt(6, limit);
                     },
                     (rs, rowNum) -> new RankedHit(toKnowledgeHit(rs), rowNum + 1)
             );
@@ -252,7 +269,7 @@ public class KnowledgeService {
         }
     }
 
-    private List<RankedHit> lexicalSearch(String query, int limit) {
+    private List<RankedHit> lexicalSearch(String query, UUID knowledgeBaseId, int limit) {
         try {
             return jdbcTemplate.query(
                     """
@@ -266,6 +283,7 @@ public class KnowledgeService {
                             JOIN knowledge_bases b ON b.id = d.knowledge_base_id
                             WHERE d.status = 'ready' AND b.enabled = TRUE
                               AND (c.content % ? OR c.search_vector @@ plainto_tsquery('simple', ?))
+                              AND b.id = ?
                             ORDER BY score DESC
                             LIMIT ?
                             """,
@@ -274,7 +292,8 @@ public class KnowledgeService {
                         ps.setString(2, query);
                         ps.setString(3, query);
                         ps.setString(4, query);
-                        ps.setInt(5, limit);
+                        ps.setObject(5, knowledgeBaseId);
+                        ps.setInt(6, limit);
                     },
                     (rs, rowNum) -> new RankedHit(toKnowledgeHit(rs), rowNum + 1)
             );
@@ -386,6 +405,10 @@ public class KnowledgeService {
 
     private String blankToNull(String value) {
         return StringUtils.hasText(value) ? value.trim() : null;
+    }
+
+    private Timestamp timestamp(Instant value) {
+        return Timestamp.from(value);
     }
 
     private record RankedHit(KnowledgeHit hit, int rank) {

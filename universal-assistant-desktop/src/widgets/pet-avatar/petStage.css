@@ -1,0 +1,220 @@
+.pet-shell {
+  display: grid;
+  place-items: end center;
+  width: 100vw;
+  height: 100vh;
+  padding-bottom: 8px;
+  overflow: hidden;
+  background: transparent;
+  pointer-events: none;
+  user-select: none;
+}
+
+.pet-button {
+  position: relative;
+  width: 208px;
+  height: 310px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: grab;
+  pointer-events: auto;
+  -webkit-app-region: no-drag;
+  transform-origin: 50% 88%;
+  clip-path: polygon(
+    40% 1%,
+    65% 1%,
+    78% 12%,
+    81% 28%,
+    100% 40%,
+    94% 52%,
+    80% 58%,
+    76% 73%,
+    80% 99%,
+    20% 99%,
+    23% 73%,
+    19% 53%,
+    1% 40%,
+    8% 27%,
+    25% 23%,
+    28% 10%
+  );
+  animation: companion-idle 4s ease-in-out infinite;
+  will-change: transform;
+}
+
+.pet-button:focus-visible {
+  outline: 3px solid var(--ua-primary);
+  outline-offset: -8px;
+}
+
+.pet-button.is-dragging {
+  cursor: grabbing;
+  animation: none;
+}
+
+.pet-button.is-clicking {
+  animation: companion-click 340ms ease-out both;
+}
+
+.pet-aura {
+  position: absolute;
+  right: 20%;
+  bottom: 1%;
+  left: 20%;
+  height: 12px;
+  border-radius: 50%;
+  background: rgba(166, 117, 217, 0.26);
+  filter: blur(8px);
+}
+
+.pet-image {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: center bottom;
+  opacity: 0;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-drag: none;
+  transition: opacity 140ms ease;
+}
+
+.pet-image.active {
+  opacity: 1;
+}
+
+.pet-expression {
+  position: absolute;
+  top: 5%;
+  right: 4%;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--ua-border-strong);
+  border-radius: 50%;
+  color: var(--ua-primary-strong);
+  background: var(--ua-panel);
+  font-size: 14px;
+  font-weight: 700;
+  opacity: 0;
+  transform: scale(0.8);
+  transition:
+    opacity 180ms ease,
+    transform 180ms ease;
+}
+
+.state-happy .pet-expression,
+.state-curious .pet-expression,
+.state-sleepy .pet-expression,
+.state-error .pet-expression,
+.action-wave .pet-expression,
+.action-fireworks .pet-expression {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.state-running .pet-button,
+.action-run .pet-button {
+  animation: companion-step 280ms ease-in-out infinite;
+}
+
+.action-jump .pet-button {
+  animation: companion-jump 800ms ease-in-out both;
+}
+
+.action-wave .pet-button,
+.action-fireworks .pet-button,
+.state-happy .pet-button {
+  animation: companion-happy 980ms ease-in-out infinite;
+}
+
+.state-thinking .pet-button,
+.state-curious .pet-button {
+  animation: companion-thinking 2s ease-in-out infinite;
+}
+
+.state-sleepy .pet-button {
+  animation-duration: 5.5s;
+}
+
+@keyframes companion-idle {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-3px);
+  }
+}
+
+@keyframes companion-step {
+  0%,
+  100% {
+    transform: translateY(0) rotate(-0.6deg);
+  }
+  50% {
+    transform: translateY(-2px) rotate(0.4deg);
+  }
+}
+
+@keyframes companion-jump {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  24% {
+    transform: scale(0.985, 1.01);
+  }
+  58% {
+    transform: scale(1.012, 0.99);
+  }
+}
+
+@keyframes companion-happy {
+  0%,
+  100% {
+    transform: rotate(0deg);
+  }
+  50% {
+    transform: rotate(1deg);
+  }
+}
+
+@keyframes companion-thinking {
+  0%,
+  100% {
+    transform: rotate(0deg);
+  }
+  50% {
+    transform: rotate(-0.8deg);
+  }
+}
+
+@keyframes companion-click {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(0.97);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pet-button,
+  .state-running .pet-button,
+  .action-run .pet-button,
+  .action-jump .pet-button {
+    animation: none;
+  }
+
+  .pet-image,
+  .pet-expression {
+    transition: none;
+  }
+}

@@ -146,46 +146,45 @@ export function createWindowMotion(options: { beforeWindowChange?: (window: Brow
       return
     }
 
-    let index = 0
-    const runSegment = () => {
+    const start = window.getBounds()
+    const path = [{ x: start.x, y: start.y }, ...points]
+    const totalDuration = points.reduce((sum, point) => sum + point.duration, 0)
+    const startedAt = Date.now()
+
+    const tick = () => {
       if (window.isDestroyed()) {
         windowAnimationTimers.delete(window.id)
         return
       }
 
-      const point = points[index]
-      const start = window.getBounds()
-      const startedAt = Date.now()
-
-      const tick = () => {
-        if (window.isDestroyed()) {
-          windowAnimationTimers.delete(window.id)
-          return
-        }
-
-        const progress = clamp((Date.now() - startedAt) / point.duration, 0, 1)
-        const eased = easeOutCubic(progress)
-        setWindowPosition(window, start.x + (point.x - start.x) * eased, start.y + (point.y - start.y) * eased)
-
-        if (progress >= 1) {
-          index += 1
-          if (index >= points.length) {
-            windowAnimationTimers.delete(window.id)
-            onComplete?.()
-            return
-          }
-
-          runSegment()
-          return
-        }
-
-        windowAnimationTimers.set(window.id, setTimeout(tick, 16))
+      const progress = clamp((Date.now() - startedAt) / totalDuration, 0, 1)
+      const elapsed = ((1 - Math.cos(Math.PI * progress)) / 2) * totalDuration
+      let segmentStart = 0
+      let index = 0
+      while (index < points.length - 1 && elapsed > segmentStart + points[index].duration) {
+        segmentStart += points[index].duration
+        index += 1
       }
 
-      tick()
+      const point = points[index]
+      const previous = path[index]
+      const segmentProgress = clamp((elapsed - segmentStart) / point.duration, 0, 1)
+      setWindowPosition(
+        window,
+        previous.x + (point.x - previous.x) * segmentProgress,
+        previous.y + (point.y - previous.y) * segmentProgress,
+      )
+
+      if (progress >= 1) {
+        windowAnimationTimers.delete(window.id)
+        onComplete?.()
+        return
+      }
+
+      windowAnimationTimers.set(window.id, setTimeout(tick, 16))
     }
 
-    runSegment()
+    tick()
   }
 
   function animateWindowOpacity(window: BrowserWindow, targetOpacity: number, duration = 180, onComplete?: () => void) {

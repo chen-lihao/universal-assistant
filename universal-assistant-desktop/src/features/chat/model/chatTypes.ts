@@ -57,7 +57,7 @@ export function welcomeMessage(): UiMessage {
   return {
     id: 'welcome',
     role: 'assistant',
-    content: '我已经在线。可以直接提问，也可以选择本地文本文件进行读取、编辑或转换。',
+    content: '你好，今天想先处理什么？',
     modelAvailable: true,
   }
 }

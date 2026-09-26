@@ -40,10 +40,13 @@ function updateTargetFormat(event: Event) {
     <div class="file-panel-header">
       <div>
         <FileText :size="16" />
-        <strong>本地文件</strong>
+        <span class="file-title">
+          <small>本地工具</small>
+          <strong>文件工作区</strong>
+        </span>
         <span v-if="selectedFileName">{{ selectedFileName }}</span>
       </div>
-      <button class="ghost-icon" type="button" title="收起文件面板" @click="$emit('close')">
+      <button class="ghost-icon" type="button" title="返回聊天" aria-label="返回聊天" @click="$emit('close')">
         <ChevronDown :size="16" />
       </button>
     </div>
@@ -57,13 +60,8 @@ function updateTargetFormat(event: Event) {
         读取
       </button>
       <label class="format-picker">
-        <span>转为</span>
-        <select
-          :value="targetFormat"
-          :disabled="!selectedFilePath"
-          aria-label="Target format"
-          @change="updateTargetFormat"
-        >
+        <span>目标格式</span>
+        <select :value="targetFormat" :disabled="!selectedFilePath" aria-label="目标格式" @change="updateTargetFormat">
           <option value="md">Markdown</option>
           <option value="txt">TXT</option>
           <option value="json">JSON</option>
@@ -80,10 +78,12 @@ function updateTargetFormat(event: Event) {
       <strong v-if="fileDirty">未保存</strong>
     </div>
     <textarea
-      v-if="selectedFilePath || fileContent"
       :value="fileContent"
       class="file-editor"
-      placeholder="读取文件后可在这里编辑内容"
+      :placeholder="
+        isElectron ? '选择本地文件后，在这里读取、编辑和转换内容' : '请在 Electron 桌面端使用本地文件工作区'
+      "
+      :disabled="!isElectron"
       @input="updateFileContent"
     />
     <div v-if="selectedFilePath || fileContent" class="tool-row end">
@@ -99,24 +99,25 @@ function updateTargetFormat(event: Event) {
 
 <style scoped>
 .file-panel {
-  display: grid;
-  gap: 10px;
-  max-height: 240px;
-  padding: 12px 14px;
-  border-top: 1px solid rgba(103, 119, 150, 0.16);
-  background: rgba(255, 255, 255, 0.96);
-  box-shadow: 0 -12px 32px rgba(30, 41, 59, 0.05);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow-y: auto;
+  padding: clamp(18px, 3vw, 34px);
+  background: var(--ua-bg);
 }
 
 .file-panel.disabled {
-  opacity: 0.55;
+  opacity: 0.72;
 }
 
 .file-panel-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 12px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--ua-border);
 }
 
 .file-panel-header div {
@@ -124,14 +125,31 @@ function updateTargetFormat(event: Event) {
   align-items: center;
   gap: 7px;
   min-width: 0;
-  color: #172033;
-  font-size: 13px;
+  color: var(--ua-ink);
+  font-size: 14px;
 }
 
-.file-panel-header span {
+.file-title {
+  display: grid;
+  gap: 0;
+  padding-left: 8px;
+  border-left: 3px solid var(--ua-companion);
+}
+
+.file-title small {
+  color: var(--ua-companion-strong);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.file-title strong {
+  color: var(--ua-ink);
+}
+
+.file-panel-header > div > span:not(.file-title) {
   overflow: hidden;
   max-width: 230px;
-  color: #6a7488;
+  color: var(--ua-muted);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -140,8 +158,8 @@ function updateTargetFormat(event: Event) {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 8px;
-  min-height: 32px;
+  gap: 10px;
+  min-height: 36px;
 }
 
 .tool-row.end {
@@ -154,12 +172,12 @@ function updateTargetFormat(event: Event) {
   align-items: center;
   justify-content: center;
   gap: 6px;
-  height: 32px;
+  height: 36px;
   padding: 0 10px;
-  border: 1px solid rgba(103, 119, 150, 0.18);
-  border-radius: 10px;
-  color: #344057;
-  background: #ffffff;
+  border: 1px solid var(--ua-border);
+  border-radius: 6px;
+  color: var(--ua-ink-soft);
+  background: var(--ua-panel);
   cursor: pointer;
   font: inherit;
   font-size: 13px;
@@ -167,13 +185,13 @@ function updateTargetFormat(event: Event) {
 
 .tool-button:hover:not(:disabled),
 .ghost-icon:hover:not(:disabled) {
-  border-color: rgba(37, 99, 235, 0.28);
-  background: #eff6ff;
-  color: #1d4ed8;
+  border-color: var(--ua-border-strong);
+  background: var(--ua-primary-soft);
+  color: var(--ua-primary-strong);
 }
 
 .ghost-icon {
-  width: 30px;
+  width: 36px;
   padding: 0;
 }
 
@@ -182,7 +200,7 @@ function updateTargetFormat(event: Event) {
   justify-content: space-between;
   gap: 8px;
   min-width: 0;
-  color: #6a7488;
+  color: var(--ua-muted);
   font-size: 12px;
 }
 
@@ -194,29 +212,31 @@ function updateTargetFormat(event: Event) {
 
 .file-meta strong {
   flex: 0 0 auto;
-  color: #f97316;
+  color: var(--ua-sun);
   font-weight: 600;
 }
 
 .file-editor {
-  width: 100%;
-  height: 88px;
-  resize: vertical;
+  flex: 1 1 auto;
+  width: min(100%, 920px);
+  min-height: 260px;
+  height: auto;
+  resize: none;
   box-sizing: border-box;
-  padding: 10px 11px;
-  border: 1px solid rgba(103, 119, 150, 0.18);
-  border-radius: 12px;
-  color: #172033;
-  background: #f8fafc;
+  padding: 18px;
+  border: 1px solid var(--ua-border-strong);
+  border-radius: 8px;
+  color: var(--ua-ink);
+  background: var(--ua-panel);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
-  line-height: 1.5;
+  font-size: 13px;
+  line-height: 1.65;
   user-select: text;
 }
 
 .file-editor:focus {
-  border-color: rgba(37, 99, 235, 0.52);
-  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+  border-color: var(--ua-primary);
+  box-shadow: var(--ua-focus);
   outline: none;
 }
 
@@ -224,12 +244,12 @@ function updateTargetFormat(event: Event) {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 32px;
+  height: 36px;
   padding: 0 9px;
-  border: 1px solid rgba(103, 119, 150, 0.18);
-  border-radius: 10px;
-  color: #59657a;
-  background: #ffffff;
+  border: 1px solid var(--ua-border);
+  border-radius: 6px;
+  color: var(--ua-muted);
+  background: var(--ua-panel);
   font-size: 12px;
 }
 
@@ -244,7 +264,7 @@ function updateTargetFormat(event: Event) {
 
 .error-text {
   margin: 0;
-  color: #dc2626;
+  color: var(--ua-danger);
   font-size: 12px;
 }
 

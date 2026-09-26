@@ -1,17 +1,33 @@
 <script setup lang="ts">
-import mascot from '../../assets/assistant-mascot.png'
-import type { FireworkParticle, ParticleStyle } from './types'
+import { computed } from 'vue'
+import happyPose from '../../assets/assistant-human-happy.webp'
+import idlePose from '../../assets/assistant-human-idle-animated.webp'
+import runningPose from '../../assets/assistant-human-running-animated.webp'
+import speakingPose from '../../assets/assistant-human-speaking-animated.webp'
+import thinkingPose from '../../assets/assistant-human-thinking.webp'
 
-defineProps<{
+const props = defineProps<{
   petState: PetState
   petAction: PetAction | null
-  particles: FireworkParticle[]
-  rocketVisible: boolean
-  burstActive: boolean
   isClicking: boolean
   isDragging: boolean
-  particleStyle: (particle: FireworkParticle) => ParticleStyle
 }>()
+
+const poseSources = {
+  idle: idlePose,
+  thinking: thinkingPose,
+  speaking: speakingPose,
+  happy: happyPose,
+  running: runningPose,
+} as const
+
+const activePose = computed<keyof typeof poseSources>(() => {
+  if (props.petAction === 'run' || props.petState === 'running') return 'running'
+  if (props.petAction === 'jump' || props.petAction === 'fireworks' || props.petState === 'happy') return 'happy'
+  if (props.petState === 'thinking' || props.petState === 'curious') return 'thinking'
+  if (props.petState === 'speaking') return 'speaking'
+  return 'idle'
+})
 
 defineEmits<{
   pointerdown: [event: PointerEvent]
@@ -40,32 +56,20 @@ defineEmits<{
       @contextmenu="$emit('contextmenu', $event)"
     >
       <span class="pet-aura" />
-      <span class="pet-speed-lines">
-        <span />
-        <span />
-        <span />
-      </span>
-      <img class="pet-image" :src="mascot" alt="Universal Assistant mascot" />
-      <span class="pet-wave" />
-      <span class="pet-signal pet-signal-one" />
-      <span class="pet-signal pet-signal-two" />
-      <span class="pet-talk" />
-      <span class="pet-emotion pet-emotion-happy">★</span>
-      <span class="pet-emotion pet-emotion-curious">?</span>
-      <span class="pet-emotion pet-emotion-sleepy">Zz</span>
-      <span class="pet-emotion pet-emotion-error">!</span>
-      <span class="pet-status" />
-      <span v-if="rocketVisible" class="firework-rocket" />
-      <span class="firework-origin" :class="{ active: burstActive }">
-        <span
-          v-for="particle in particles"
-          :key="particle.id"
-          class="firework-particle"
-          :style="particleStyle(particle)"
-        />
+      <img
+        v-for="(source, pose) in poseSources"
+        :key="pose"
+        class="pet-image"
+        :class="{ active: activePose === pose }"
+        :src="source"
+        :alt="activePose === pose ? 'Universal Assistant virtual companion' : ''"
+        :aria-hidden="activePose === pose ? undefined : true"
+      />
+      <span class="pet-expression" aria-hidden="true">
+        {{ petState === 'sleepy' ? 'Zz' : petState === 'error' ? '!' : petState === 'curious' ? '?' : '✦' }}
       </span>
     </button>
   </main>
 </template>
 
-<style src="./petSprite.css" scoped></style>
+<style src="./petStage.css" scoped></style>

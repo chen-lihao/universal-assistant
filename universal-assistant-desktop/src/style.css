@@ -1,18 +1,90 @@
 :root {
   font-family:
-    Inter,
+    'Avenir Next',
+    'PingFang SC',
+    'Microsoft YaHei',
+    'Noto Sans CJK SC',
     ui-sans-serif,
     system-ui,
     -apple-system,
     BlinkMacSystemFont,
     'Segoe UI',
     sans-serif;
+  color: #211c2f;
+  background: transparent;
   line-height: 1.5;
   font-weight: 400;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+
+  --ua-bg: #f7f6fb;
+  --ua-bg-deep: #efedf5;
+  --ua-panel: #ffffff;
+  --ua-panel-soft: #fcfbff;
+  --ua-panel-tint: #f3effb;
+  --ua-ink: #211c2f;
+  --ua-ink-soft: #51495f;
+  --ua-muted: #6e657c;
+  --ua-border: #e3dfed;
+  --ua-border-strong: #c9c2d8;
+  --ua-primary: #6b49bb;
+  --ua-primary-strong: #53339c;
+  --ua-primary-soft: #f0ebfa;
+  --ua-on-primary: #ffffff;
+  --ua-companion: #be70a5;
+  --ua-companion-strong: #9a4d83;
+  --ua-companion-soft: #faf0f7;
+  --ua-sakura: #be70a5;
+  --ua-sakura-soft: #faf0f7;
+  --ua-sun: #906923;
+  --ua-sun-soft: #faf4e8;
+  --ua-danger: #b9475e;
+  --ua-danger-soft: #fcf0f2;
+  --ua-shadow-sm: 0 4px 12px rgba(33, 28, 47, 0.06);
+  --ua-shadow-md: 0 16px 38px rgba(33, 28, 47, 0.16);
+  --ua-focus: 0 0 0 3px rgba(107, 73, 187, 0.2);
+  --ua-rail: #efedf5;
+  --ua-selection: rgba(190, 112, 165, 0.22);
+  --ua-user-bubble: #eee8fa;
+  --ua-user-border: #d7c9ef;
+  --ua-hover: #e9e2f7;
+}
+
+:root[data-theme='dark'] {
+  color: #f3effa;
+  --ua-bg: #15121d;
+  --ua-bg-deep: #211c2b;
+  --ua-panel: #221d2d;
+  --ua-panel-soft: #292336;
+  --ua-panel-tint: #322a42;
+  --ua-ink: #f3effa;
+  --ua-ink-soft: #d4cce1;
+  --ua-muted: #b4a9c5;
+  --ua-border: #41384e;
+  --ua-border-strong: #645873;
+  --ua-primary: #b597ec;
+  --ua-primary-strong: #d7c2ff;
+  --ua-primary-soft: #382d4c;
+  --ua-on-primary: #20162e;
+  --ua-companion: #de91c2;
+  --ua-companion-strong: #f1b6d8;
+  --ua-companion-soft: #402b40;
+  --ua-sakura: #de91c2;
+  --ua-sakura-soft: #402b40;
+  --ua-sun: #dfb666;
+  --ua-sun-soft: #423623;
+  --ua-danger: #ee8ea0;
+  --ua-danger-soft: #452934;
+  --ua-shadow-sm: 0 4px 12px rgba(4, 3, 8, 0.18);
+  --ua-shadow-md: 0 18px 42px rgba(4, 3, 8, 0.4);
+  --ua-focus: 0 0 0 3px rgba(181, 151, 236, 0.28);
+  --ua-rail: #1d1927;
+  --ua-selection: rgba(222, 145, 194, 0.35);
+  --ua-user-bubble: #382d4c;
+  --ua-user-border: #5c4c75;
+  --ua-hover: #49385f;
 }
 
 html,
@@ -32,10 +104,62 @@ body {
 
 * {
   box-sizing: border-box;
+  letter-spacing: 0;
 }
 
-button:focus,
 button:focus-visible {
-  outline: 2px solid rgba(23, 109, 102, 0.55);
+  outline: 2px solid var(--ua-primary);
   outline-offset: 2px;
+}
+
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--ua-primary);
+  outline-offset: 2px;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+::selection {
+  color: var(--ua-ink);
+  background: var(--ua-selection);
+}
+
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: var(--ua-border-strong);
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--ua-primary);
+  background-clip: padding-box;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+  }
 }

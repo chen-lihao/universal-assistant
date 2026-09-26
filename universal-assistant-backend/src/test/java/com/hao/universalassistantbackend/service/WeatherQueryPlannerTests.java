@@ -2,6 +2,7 @@ package com.hao.universalassistantbackend.service;
 
 import com.hao.universalassistantbackend.model.ChatMessage;
 import com.hao.universalassistantbackend.model.WeatherPlan;
+import com.hao.universalassistantbackend.model.WeatherContextPolicy;
 import org.junit.jupiter.api.Test;
 
 import java.time.LocalDate;
@@ -64,5 +65,17 @@ class WeatherQueryPlannerTests {
         assertEquals(3, plan.queries().size());
         assertTrue(plan.queries().stream().allMatch(query -> "广州".equals(query.resolvedLocation())));
         assertTrue(plan.queries().stream().anyMatch(query -> today.plusDays(2).toString().equals(query.targetDate())));
+    }
+
+    @Test
+    void asksForLocationInsteadOfTreatingResumeOrPronounAsWeatherLocation() {
+        List<ChatMessage> history = WeatherContextPolicy.relatedHistory(List.of(
+                new ChatMessage("user", "简历里写了广州项目经历。")
+        ));
+
+        WeatherPlan plan = planner.plan("这里天气怎么样？", history, "");
+
+        assertTrue(plan.needsClarification());
+        assertTrue(plan.queries().isEmpty());
     }
 }

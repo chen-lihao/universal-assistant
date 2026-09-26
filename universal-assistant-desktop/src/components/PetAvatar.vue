@@ -9,12 +9,8 @@ const pet = usePetAvatar()
   <PetSprite
     :pet-state="pet.petState.value"
     :pet-action="pet.petAction.value"
-    :particles="pet.particles.value"
-    :rocket-visible="pet.rocketVisible.value"
-    :burst-active="pet.burstActive.value"
     :is-clicking="pet.isClicking.value"
     :is-dragging="pet.isDragging.value"
-    :particle-style="pet.particleStyle"
     @pointerdown="pet.startDrag"
     @pointermove="pet.moveDrag"
     @pointerup="pet.finishDrag"

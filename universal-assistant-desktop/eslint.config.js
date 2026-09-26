@@ -16,6 +16,7 @@ const browserGlobals = {
   AbortController: 'readonly',
   DOMException: 'readonly',
   Event: 'readonly',
+  HTMLCanvasElement: 'readonly',
   HTMLInputElement: 'readonly',
   HTMLSelectElement: 'readonly',
   HTMLTextAreaElement: 'readonly',
@@ -28,6 +29,9 @@ const browserGlobals = {
   URLSearchParams: 'readonly',
   document: 'readonly',
   fetch: 'readonly',
+  performance: 'readonly',
+  requestAnimationFrame: 'readonly',
+  cancelAnimationFrame: 'readonly',
   window: 'readonly',
 }
 

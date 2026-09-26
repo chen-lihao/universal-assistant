@@ -47,6 +47,9 @@ interface Window {
     movePetBy: (payload: { deltaX: number; deltaY: number }) => Promise<void>
     onPetState: (callback: (state: PetState) => void) => () => void
     onPetAction: (callback: (action: PetAction) => void) => () => void
+    onFirework: (
+      callback: (payload: { startX: number; startY: number; burstX: number; burstY: number }) => void,
+    ) => () => void
     files: {
       select: (options?: { directory?: boolean; multiple?: boolean }) => Promise<FileSelectResult>
       readText: (filePath: string) => Promise<TextFileResult>

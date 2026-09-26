@@ -13,16 +13,19 @@ import com.hao.universalassistantbackend.model.ChatMessage;
 import com.hao.universalassistantbackend.model.ChatRequest;
 import com.hao.universalassistantbackend.model.ChatResponse;
 import com.hao.universalassistantbackend.model.ChatStreamEvent;
+import com.hao.universalassistantbackend.model.EvidenceSourcePolicy;
 import com.hao.universalassistantbackend.model.MemoryHit;
 import com.hao.universalassistantbackend.model.MessageBlock;
 import com.hao.universalassistantbackend.model.SearchResult;
 import com.hao.universalassistantbackend.model.WeatherPlan;
+import com.hao.universalassistantbackend.model.WeatherContextPolicy;
 import com.hao.universalassistantbackend.model.WeatherQuery;
 import com.hao.universalassistantbackend.model.WeatherReport;
 import com.hao.universalassistantbackend.rag.KnowledgeHit;
-import com.hao.universalassistantbackend.rag.KnowledgeService;
+import com.hao.universalassistantbackend.rag.KnowledgeRetrievalService;
 import com.hao.universalassistantbackend.skill.ActiveSkill;
 import com.hao.universalassistantbackend.skill.SkillService;
+import com.hao.universalassistantbackend.tools.CareerTools;
 import com.hao.universalassistantbackend.tools.WeatherTools;
 import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatOptions;
 import org.springframework.ai.chat.client.ChatClient;
@@ -90,12 +93,13 @@ public class ChatService {
     private final AgentRunService agentRunService;
     private final MemoryService memoryService;
     private final WeatherTools weatherTools;
+    private final CareerTools careerTools;
     private final WeatherQueryPlanner weatherQueryPlanner;
     private final PendingAgentActionService pendingAgentActionService;
     private final MessageBlockFactory messageBlockFactory;
     private final AgentPolicy agentPolicy;
     private final ContextAssembler contextAssembler;
-    private final KnowledgeService knowledgeService;
+    private final KnowledgeRetrievalService knowledgeRetrievalService;
     private final SkillService skillService;
     private final String dashScopeApiKey;
     private final int maxTokens;
@@ -106,12 +110,13 @@ public class ChatService {
                        AgentRunService agentRunService,
                        MemoryService memoryService,
                        WeatherTools weatherTools,
+                       CareerTools careerTools,
                        WeatherQueryPlanner weatherQueryPlanner,
                        PendingAgentActionService pendingAgentActionService,
                        MessageBlockFactory messageBlockFactory,
                        AgentPolicy agentPolicy,
                        ContextAssembler contextAssembler,
-                       KnowledgeService knowledgeService,
+                       KnowledgeRetrievalService knowledgeRetrievalService,
                        SkillService skillService,
                        @Value("${spring.ai.dashscope.api-key:}") String dashScopeApiKey,
                        @Value("${assistant.chat.max-tokens:2400}") int maxTokens) {
@@ -121,12 +126,13 @@ public class ChatService {
         this.agentRunService = agentRunService;
         this.memoryService = memoryService;
         this.weatherTools = weatherTools;
+        this.careerTools = careerTools;
         this.weatherQueryPlanner = weatherQueryPlanner;
         this.pendingAgentActionService = pendingAgentActionService;
         this.messageBlockFactory = messageBlockFactory;
         this.agentPolicy = agentPolicy;
         this.contextAssembler = contextAssembler;
-        this.knowledgeService = knowledgeService;
+        this.knowledgeRetrievalService = knowledgeRetrievalService;
         this.skillService = skillService;
         this.dashScopeApiKey = dashScopeApiKey;
         this.maxTokens = maxTokens;
@@ -136,6 +142,7 @@ public class ChatService {
             AgentRunContext runContext,
             AgentMode mode,
             boolean useSearch,
+            WeatherPlan weatherPlan,
             WeatherReport weatherReport,
             List<SearchResult> sources,
             List<MemoryHit> memories,
@@ -230,14 +237,11 @@ public class ChatService {
             throw new UncheckedIOException(ex);
         }
 
-        if (agentContext.weatherReport() != null
-                && !agentContext.weatherReport().available()
-                && agentContext.weatherReport().sources().isEmpty()
-                && agentContext.sources().isEmpty()) {
+        if (agentContext.weatherReport() != null && !agentContext.weatherReport().available()) {
             return persistChatResponse(
                     conversation,
-                    agentContext.weatherReport().summary(),
-                    true,
+                    unavailableWeatherAnswer(agentContext),
+                    agentContext.useSearch(),
                     modelAvailable,
                     selectedModel,
                     agentContext.sources(),
@@ -260,7 +264,9 @@ public class ChatService {
                             .temperature(0.5)
                             .maxToken(maxTokens)
                             .build())
-                    .tools(weatherTools)
+                    .tools(agentContext.weatherReport() == null
+                            ? new Object[]{weatherTools, careerTools}
+                            : new Object[]{weatherTools})
                     .user(buildUserPrompt(
                             message,
                             conversationSummary,
@@ -405,22 +411,20 @@ public class ChatService {
         emit(consumer, ChatStreamEvent.status("answering", "回答中"));
         String answerBlockId = beginMarkdownBlock(consumer);
 
-        if (agentContext.weatherReport() != null
-                && !agentContext.weatherReport().available()
-                && agentContext.weatherReport().sources().isEmpty()
-                && agentContext.sources().isEmpty()) {
+        if (agentContext.weatherReport() != null && !agentContext.weatherReport().available()) {
+            String answer = unavailableWeatherAnswer(agentContext);
             MessageEntity savedMessage = saveAssistantMessageAndFinalize(
                     conversation,
-                    agentContext.weatherReport().summary(),
+                    answer,
                     selectedModel,
-                    true,
+                    agentContext.useSearch(),
                     modelAvailable,
                     agentContext.sources(),
                     agentContext.runContext(),
                     message
             );
-            emit(consumer, ChatStreamEvent.meta(selectedModel, true, modelAvailable, agentContext.sources(), conversation.getId(), savedMessage.getId(), userMessage.getId(), agentContext.runContext().run().getId()));
-            emitChunkedAnswerDelta(consumer, answerBlockId, agentContext.weatherReport().summary());
+            emit(consumer, ChatStreamEvent.meta(selectedModel, agentContext.useSearch(), modelAvailable, agentContext.sources(), conversation.getId(), savedMessage.getId(), userMessage.getId(), agentContext.runContext().run().getId()));
+            emitChunkedAnswerDelta(consumer, answerBlockId, answer);
             endMarkdownBlock(consumer, answerBlockId);
             emit(consumer, ChatStreamEvent.done());
             return;
@@ -469,7 +473,9 @@ public class ChatService {
                             .temperature(0.5)
                             .maxToken(maxTokens)
                             .build())
-                    .tools(weatherTools)
+                    .tools(agentContext.weatherReport() == null
+                            ? new Object[]{weatherTools, careerTools}
+                            : new Object[]{weatherTools})
                     .user(buildUserPrompt(
                             message,
                             conversationSummary,
@@ -713,13 +719,15 @@ public class ChatService {
                 consumer
         );
 
+        String query = String.valueOf(pendingInput.getOrDefault("query", message));
+        boolean weatherIntent = shouldUseWeatherTool(message) || shouldUseWeatherTool(query);
         List<SearchResult> sources = new ArrayList<>();
         if (approved) {
-            String query = String.valueOf(pendingInput.getOrDefault("query", message));
             emit(consumer, ChatStreamEvent.status("searching", "检索中"));
             AgentStepResponse searchStep = addAgentStep(context, "action", "调用实时检索", "query=" + query, "completed", consumer);
             Instant startedAt = Instant.now();
-            sources.addAll(searchSafely(query, 5));
+            List<SearchResult> searchResults = searchSafely(query, 5);
+            sources.addAll(weatherIntent ? EvidenceSourcePolicy.weatherSources(searchResults) : searchResults);
             emitSourcesMeta(context, true, runModelAvailable(context), sources, consumer);
             agentRunService.recordToolCall(
                     context,
@@ -736,13 +744,29 @@ public class ChatService {
         boolean modelConfigured = isModelConfigured();
         ChatClient chatClient = modelConfigured ? chatClientProvider.getIfAvailable() : null;
         boolean modelAvailable = modelConfigured && chatClient != null;
-        List<MemoryHit> memories = memoryService.retrieveRelevantMemories(message, conversation.getId());
-        String conversationSummary = conversationService.summaryText(conversation.getId()).orElse("");
-        List<ChatMessage> history = conversationService.recentHistory(conversation.getId(), 16);
         emit(consumer, ChatStreamEvent.meta(selectedModel, approved, modelAvailable, sources, conversation.getId(), null, context.run().getUserMessageId(), context.run().getId()));
         emit(consumer, ChatStreamEvent.status("answering", "回答中"));
         String answerBlockId = beginMarkdownBlock(consumer);
         agentRunService.updateProgress(context, "", approved, modelAvailable, sources);
+
+        if (weatherIntent) {
+            WeatherReport unavailableReport = WeatherReport.unavailable(
+                    "",
+                    approved ? "天气服务未提供可核实的实时天气数据。" : "你已选择不联网检索，当前无法核实实时天气。",
+                    List.of()
+            );
+            String answer = unavailableWeatherAnswer(unavailableReport, false, sources);
+            MessageEntity savedMessage = saveAssistantMessageAndFinalize(conversation, answer, selectedModel, approved, modelAvailable, sources, context, message);
+            emit(consumer, ChatStreamEvent.meta(selectedModel, approved, modelAvailable, sources, conversation.getId(), savedMessage.getId(), context.run().getUserMessageId(), context.run().getId()));
+            emitChunkedAnswerDelta(consumer, answerBlockId, answer);
+            endMarkdownBlock(consumer, answerBlockId);
+            emit(consumer, ChatStreamEvent.done());
+            return;
+        }
+
+        List<MemoryHit> memories = memoryService.retrieveRelevantMemories(message, conversation.getId());
+        String conversationSummary = conversationService.summaryText(conversation.getId()).orElse("");
+        List<ChatMessage> history = conversationService.recentHistory(conversation.getId(), 16);
 
         if (!modelAvailable) {
             String answer = approved
@@ -770,7 +794,7 @@ public class ChatService {
                             .temperature(0.5)
                             .maxToken(maxTokens)
                             .build())
-                    .tools(weatherTools)
+                    .tools(weatherTools, careerTools)
                     .user(buildUserPrompt(
                             promptMessage,
                             conversationSummary,
@@ -816,6 +840,7 @@ public class ChatService {
                             context,
                             context.mode(),
                             approved,
+                            WeatherPlan.empty(),
                             null,
                             sources,
                             memories,
@@ -875,9 +900,11 @@ public class ChatService {
                                                      ChatClient chatClient,
                                                      boolean modelAvailable,
                                                      ChatStreamConsumer consumer) throws IOException {
-        WeatherPlan weatherPlan = weatherQueryPlanner.plan(message, history, conversationSummary);
+        WeatherPlan weatherPlan = weatherQueryPlanner.plan(message, WeatherContextPolicy.relatedHistory(history), "");
         boolean weatherIntent = shouldUseWeatherTool(message) || weatherPlan.weatherIntent();
-        SearchDecision searchDecision = decideSearchNeed(message, history, chatClient, selectedModel);
+        SearchDecision searchDecision = weatherIntent
+                ? new SearchDecision(false, "天气任务由天气工具与降级检索处理。", message)
+                : decideSearchNeed(message, history, chatClient, selectedModel);
         boolean useSearch = Boolean.TRUE.equals(requestedSearch) || (!weatherIntent && searchDecision.needsSearch());
         AgentMode mode = agentPolicy.selectMode(message, weatherIntent, useSearch);
         AgentRunContext runContext = agentRunService.startRun(conversation, userMessage, mode, message, selectedModel);
@@ -917,7 +944,9 @@ public class ChatService {
             );
         }
 
-        List<KnowledgeHit> knowledgeHits = knowledgeService.search(message);
+        KnowledgeRetrievalService.RetrievalResult retrieval = knowledgeRetrievalService.retrieve(message, weatherIntent, activeSkills);
+        addAgentStep(runContext, "retrieval", "本地知识检索决策", retrieval.reason(), "completed", consumer);
+        List<KnowledgeHit> knowledgeHits = retrieval.hits();
         if (!knowledgeHits.isEmpty()) {
             knowledgeHits.stream().map(KnowledgeHit::toSearchResult).forEach(sources::add);
             String knowledgeSummary = knowledgeHits.stream()
@@ -936,7 +965,7 @@ public class ChatService {
                     runContext,
                     knowledgeStep,
                     "knowledge_search",
-                    Map.of("query", message, "limit", knowledgeHits.size()),
+                    Map.of("query", message, "knowledgeBaseId", retrieval.knowledgeBaseId().toString(), "limit", knowledgeHits.size()),
                     knowledgeSummary,
                     "completed",
                     Instant.now()
@@ -944,7 +973,9 @@ public class ChatService {
             emitSourcesMeta(runContext, useSearch, modelAvailable, sources, consumer);
         }
 
-        List<MemoryHit> memories = memoryService.retrieveRelevantMemories(message, conversation.getId());
+        List<MemoryHit> memories = weatherIntent
+                ? List.of()
+                : memoryService.retrieveRelevantMemories(message, conversation.getId());
         if (!memories.isEmpty()) {
             AgentStepResponse memoryStep = addAgentStep(
                     runContext,
@@ -987,6 +1018,9 @@ public class ChatService {
             AgentStepResponse searchStep = addAgentStep(runContext, "action", "调用实时检索", "query=" + message, "completed", consumer);
             Instant startedAt = Instant.now();
             List<SearchResult> searchResults = searchSafely(message, 5);
+            if (weatherIntent) {
+                searchResults = EvidenceSourcePolicy.weatherSources(searchResults);
+            }
             sources.addAll(searchResults);
             emitSourcesMeta(runContext, true, modelAvailable, sources, consumer);
             agentRunService.recordToolCall(
@@ -1005,12 +1039,14 @@ public class ChatService {
             addAgentStep(runContext, "plan", "直接回答", "问题不需要拆解或调用工具，直接结合会话上下文回答。", "completed", consumer);
         }
 
-        List<SearchResult> finalSources = deduplicateSources(sources);
-        agentRunService.updateProgress(runContext, null, useSearch, modelAvailable, finalSources);
+        List<SearchResult> finalSources = deduplicateSources(weatherIntent ? EvidenceSourcePolicy.weatherSources(sources) : sources);
+        boolean effectiveSearch = useSearch || finalSources.stream().anyMatch(source -> "web".equals(source.provider()));
+        agentRunService.updateProgress(runContext, null, effectiveSearch, modelAvailable, finalSources);
         return new PreparedAgentContext(
                 runContext,
                 mode,
-                useSearch,
+                effectiveSearch,
+                weatherPlan,
                 weatherReport,
                 finalSources,
                 memories,
@@ -1231,6 +1267,9 @@ public class ChatService {
             AgentStepResponse searchStep = addAgentStep(runContext, "action", "调用实时检索", "query=" + message, "completed", consumer);
             Instant startedAt = Instant.now();
             List<SearchResult> searchResults = searchSafely(message, 5);
+            if (weatherIntent) {
+                searchResults = EvidenceSourcePolicy.weatherSources(searchResults);
+            }
             sources.addAll(searchResults);
             emitSourcesMeta(runContext, true, runModelAvailable(runContext), sources, consumer);
             agentRunService.recordToolCall(
@@ -1262,7 +1301,7 @@ public class ChatService {
                     consumer
             );
             Instant startedAt = Instant.now();
-            List<SearchResult> fallbackResults = searchSafely(fallbackQuery, 5);
+            List<SearchResult> fallbackResults = EvidenceSourcePolicy.weatherSources(searchSafely(fallbackQuery, 5));
             sources.addAll(fallbackResults);
             emitSourcesMeta(runContext, true, runModelAvailable(runContext), sources, consumer);
             agentRunService.recordToolCall(
@@ -2397,11 +2436,7 @@ public class ChatService {
             if (weatherReport.available()) {
                 return weatherReport.summary();
             }
-            if (!sources.isEmpty()) {
-                return weatherReport.summary() + "\n\n" + fallbackSearchSummary(sources);
-            }
-
-            return weatherReport.summary();
+            return unavailableWeatherAnswer(weatherReport, false, sources);
         }
 
         if (modelAvailable) {
@@ -2413,6 +2448,29 @@ public class ChatService {
         }
 
         return fallbackAnswerWithoutModel(sources);
+    }
+
+    private String unavailableWeatherAnswer(PreparedAgentContext context) {
+        return unavailableWeatherAnswer(
+                context.weatherReport(),
+                context.weatherPlan() != null && context.weatherPlan().needsClarification(),
+                context.sources()
+        );
+    }
+
+    private String unavailableWeatherAnswer(WeatherReport report, boolean needsClarification, List<SearchResult> sources) {
+        if (needsClarification) {
+            return report.summary();
+        }
+        List<SearchResult> webWeatherSources = EvidenceSourcePolicy.weatherSources(sources).stream()
+                .filter(source -> "web".equals(source.provider()))
+                .toList();
+        if (webWeatherSources.isEmpty()) {
+            return report.summary() + "\n\n没有找到可核实的实时天气数据，因此不会推测天气、气温或降水量。";
+        }
+        return report.summary()
+                + "\n\n天气服务暂不可用。以下是实时检索找到的天气页面摘要，尚不能据此核实具体数值或预报，请打开来源确认：\n\n"
+                + fallbackSearchSummary(webWeatherSources);
     }
 
     private String fallbackSearchSummary(List<SearchResult> sources) {

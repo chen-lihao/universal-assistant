@@ -142,7 +142,7 @@ public class WeatherQueryPlanner {
 
         if (locations.isEmpty()) {
             String cleaned = cleanLocationText(message);
-            if (StringUtils.hasText(cleaned) && cleaned.length() <= 12) {
+            if (StringUtils.hasText(cleaned) && cleaned.length() <= 12 && !isVagueLocation(cleaned)) {
                 locations.put(cleaned, new LocationCandidate(cleaned, cleaned, "user_input", 0.55));
             }
         }
@@ -349,7 +349,17 @@ public class WeatherQueryPlanner {
                 || message.contains("路线")
                 || message.contains("景点")
                 || message.contains("它们")
-                || message.contains("这些地方");
+                || message.contains("这些地方")
+                || message.contains("这里")
+                || message.contains("那里")
+                || message.contains("附近")
+                || message.contains("当地")
+                || message.contains("本地");
+    }
+
+    private boolean isVagueLocation(String value) {
+        return List.of("这里", "那里", "这儿", "那儿", "附近", "当地", "本地", "这个地方", "上述地区")
+                .contains(value);
     }
 
     private String contextText(List<ChatMessage> history, String conversationSummary) {

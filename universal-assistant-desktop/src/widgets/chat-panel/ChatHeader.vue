@@ -1,18 +1,19 @@
 <script setup lang="ts">
-import { Bot, History as HistoryIcon, Plus, Sparkles, X } from '@lucide/vue'
+import { Moon, Sun, X } from '@lucide/vue'
+import mascot from '../../assets/assistant-human-portrait.webp'
 import type { UiPhase } from '../../features/chat/model/chatTypes'
+import { useAppearanceStore } from '../../features/appearance/stores/appearanceStore'
+
+const appearance = useAppearanceStore()
 
 defineProps<{
   subtitle: string
   statusText: string
   isSending: boolean
   currentPhase: UiPhase
-  conversationPanelOpen: boolean
 }>()
 
 defineEmits<{
-  newConversation: []
-  toggleHistory: []
   close: []
 }>()
 </script>
@@ -21,42 +22,35 @@ defineEmits<{
   <header class="chat-header">
     <div class="brand">
       <span class="brand-avatar" aria-hidden="true">
-        <Bot :size="18" />
+        <img :src="mascot" alt="" />
       </span>
       <div class="brand-copy">
-        <strong>Universal Assistant</strong>
+        <strong>
+          <span>Universal Assistant</span>
+          <small>数字精灵</small>
+        </strong>
         <span>{{ subtitle }}</span>
       </div>
     </div>
     <div class="header-actions">
       <span
-        class="status-pill"
+        class="header-status"
         :class="{ active: isSending, done: currentPhase === 'done', error: currentPhase === 'error' }"
       >
-        <Sparkles :size="13" />
+        <i aria-hidden="true" />
         {{ isSending ? statusText : currentPhase === 'idle' ? '就绪' : statusText }}
       </span>
       <button
-        class="icon-button"
+        class="icon-button theme-button"
         type="button"
-        aria-label="New conversation"
-        title="新会话"
-        :disabled="isSending"
-        @click="$emit('newConversation')"
+        :aria-label="appearance.theme === 'dark' ? '切换明亮主题' : '切换黑暗主题'"
+        :title="appearance.theme === 'dark' ? '明亮主题' : '黑暗主题'"
+        @click="appearance.toggleTheme()"
       >
-        <Plus :size="18" />
+        <Sun v-if="appearance.theme === 'dark'" :size="17" />
+        <Moon v-else :size="17" />
       </button>
-      <button
-        class="icon-button"
-        type="button"
-        aria-label="Conversation history"
-        title="历史会话"
-        :class="{ active: conversationPanelOpen }"
-        @click="$emit('toggleHistory')"
-      >
-        <HistoryIcon :size="18" />
-      </button>
-      <button class="icon-button" type="button" aria-label="Close chat" title="关闭" @click="$emit('close')">
+      <button class="icon-button" type="button" aria-label="关闭聊天框" title="关闭聊天框" @click="$emit('close')">
         <X :size="18" />
       </button>
     </div>
@@ -65,14 +59,15 @@ defineEmits<{
 
 <style scoped>
 .chat-header {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  min-height: 64px;
-  padding: 12px 14px 12px 16px;
-  border-bottom: 1px solid rgba(103, 119, 150, 0.16);
-  background: rgba(255, 255, 255, 0.92);
-  backdrop-filter: blur(16px);
+  min-height: 56px;
+  gap: 12px;
+  padding: 6px 14px 6px 12px;
+  border-bottom: 1px solid var(--ua-border);
+  background: var(--ua-panel);
   -webkit-app-region: drag;
 }
 
@@ -84,37 +79,68 @@ defineEmits<{
 }
 
 .brand-avatar {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  width: 34px;
-  height: 34px;
-  border-radius: 12px;
-  color: #ffffff;
-  background: #2563eb;
-  box-shadow: 0 8px 18px rgba(37, 99, 235, 0.22);
+  width: 40px;
+  height: 40px;
+  overflow: hidden;
+  border: 1px solid var(--ua-border);
+  border-radius: 7px;
+  background: var(--ua-companion-soft);
+  box-shadow: none;
+}
+
+.brand-avatar::before {
+  content: '';
+  position: absolute;
+  inset: 3px;
+  z-index: 1;
+  border: 1px solid rgba(255, 255, 255, 0.46);
+  border-radius: 4px;
+  pointer-events: none;
+}
+
+.brand-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center 34%;
 }
 
 .brand-copy {
   display: grid;
-  gap: 2px;
+  gap: 1px;
   min-width: 0;
 }
 
 .brand-copy strong {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
   overflow: hidden;
-  color: #141b2d;
-  font-size: 15px;
+  color: var(--ua-ink);
+  font-size: 13px;
   line-height: 18px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.brand-copy strong small {
+  flex: none;
+  padding-left: 7px;
+  border-left: 2px solid var(--ua-sakura);
+  color: var(--ua-companion-strong);
+  font-size: 10px;
+  font-weight: 700;
+}
+
 .brand-copy span {
   overflow: hidden;
-  color: #6a7488;
-  font-size: 12px;
+  color: var(--ua-muted);
+  font-size: 11px;
   line-height: 16px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -127,67 +153,79 @@ defineEmits<{
 .header-actions {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 5px;
   flex: 0 0 auto;
 }
 
-.status-pill,
+.header-status,
 .icon-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
-  border: 1px solid rgba(103, 119, 150, 0.18);
-  background: #ffffff;
+  border: 1px solid var(--ua-border);
+  background: var(--ua-panel);
   font: inherit;
 }
 
-.status-pill {
+.header-status {
   height: 28px;
-  padding: 0 9px;
-  border-color: rgba(20, 184, 166, 0.2);
-  border-radius: 999px;
-  color: #0f766e;
-  background: rgba(20, 184, 166, 0.1);
-  font-size: 12px;
+  padding: 0 8px;
+  border-color: transparent;
+  color: var(--ua-muted);
+  background: transparent;
+  font-size: 11px;
+  white-space: nowrap;
 }
 
-.status-pill.active {
-  color: #b45309;
-  background: rgba(245, 158, 11, 0.14);
-  border-color: rgba(245, 158, 11, 0.24);
+.header-status i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ua-companion);
 }
 
-.status-pill.done {
-  color: #0f766e;
-  background: rgba(20, 184, 166, 0.12);
-  border-color: rgba(20, 184, 166, 0.24);
+.header-status.active {
+  color: var(--ua-sun);
 }
 
-.status-pill.error {
-  color: #b91c1c;
-  background: rgba(239, 68, 68, 0.12);
-  border-color: rgba(239, 68, 68, 0.24);
+.header-status.active i {
+  background: var(--ua-sun);
+  animation: status-pulse 1.5s ease-in-out infinite;
+}
+
+.header-status.error {
+  color: var(--ua-danger);
+}
+
+.header-status.error i {
+  background: var(--ua-danger);
 }
 
 .icon-button {
   width: 32px;
   height: 32px;
   padding: 0;
-  border-radius: 10px;
-  color: #59657a;
+  border-radius: 7px;
+  color: var(--ua-muted);
+  transition:
+    color 160ms ease,
+    background 160ms ease,
+    border-color 160ms ease,
+    transform 160ms ease;
 }
 
 .icon-button:hover {
-  color: #ef4444;
-  background: #fff1f2;
-  border-color: rgba(239, 68, 68, 0.24);
+  color: var(--ua-primary);
+  background: var(--ua-primary-soft);
+  border-color: var(--ua-border-strong);
+  transform: translateY(-1px);
 }
 
 .icon-button.active {
-  color: #2563eb;
-  background: #eff6ff;
-  border-color: rgba(37, 99, 235, 0.28);
+  color: var(--ua-primary);
+  background: var(--ua-primary-soft);
+  border-color: var(--ua-border-strong);
 }
 
 .icon-button:disabled {
@@ -195,9 +233,15 @@ defineEmits<{
   opacity: 0.48;
 }
 
-@media (max-width: 420px) {
-  .status-pill {
+@media (max-width: 640px) {
+  .header-status {
     display: none;
+  }
+}
+
+@keyframes status-pulse {
+  50% {
+    opacity: 0.45;
   }
 }
 </style>

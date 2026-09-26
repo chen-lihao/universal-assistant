@@ -21,6 +21,7 @@ public class ToolRegistry {
         register(registered, new ToolDescriptor("file_write", "写入或修改本地文件", List.of("filesystem:write"), true, 30, 0));
         register(registered, new ToolDescriptor("file_convert", "转换用户选择的文件", List.of("filesystem:read", "filesystem:write"), true, 60, 0));
         register(registered, new ToolDescriptor("read_skill", "按需加载一个 Skill 的完整操作说明", List.of("skill:read"), false, 5, 0));
+        register(registered, new ToolDescriptor("career_evidence_search", "检索求职档案中的可验证简历与岗位证据", List.of("knowledge:read", "career:read"), false, 10, 0));
         tools = Map.copyOf(registered);
     }
 

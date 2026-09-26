@@ -1,8 +1,10 @@
 package com.hao.universalassistantbackend.context;
 
 import com.hao.universalassistantbackend.model.ChatMessage;
+import com.hao.universalassistantbackend.model.EvidenceSourcePolicy;
 import com.hao.universalassistantbackend.model.MemoryHit;
 import com.hao.universalassistantbackend.model.SearchResult;
+import com.hao.universalassistantbackend.model.WeatherContextPolicy;
 import com.hao.universalassistantbackend.skill.ActiveSkill;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
@@ -21,12 +23,17 @@ public class ContextAssembler {
     public String assemble(ContextRequest request) {
         StringBuilder prompt = new StringBuilder();
         appendRuntimeMetadata(prompt, request);
-        appendSummary(prompt, request.conversationSummary());
-        appendHistory(prompt, request.history());
+        boolean weatherTask = request.weatherReport() != null;
+        if (!weatherTask) {
+            appendSummary(prompt, request.conversationSummary());
+        }
+        appendHistory(prompt, weatherTask ? WeatherContextPolicy.relatedHistory(request.history()) : request.history());
         appendSkills(prompt, request.skills());
-        appendMemories(prompt, request.memories());
+        if (!weatherTask) {
+            appendMemories(prompt, request.memories());
+        }
         appendPlan(prompt, request.plan());
-        appendSources(prompt, request.sources());
+        appendSources(prompt, weatherTask ? EvidenceSourcePolicy.weatherSources(request.sources()) : request.sources());
         appendWeather(prompt, request);
         prompt.append("User question:\n").append(request.message());
         return tokenBudgetManager.fit(prompt.toString(), request.message());
@@ -123,8 +130,11 @@ public class ContextAssembler {
                 .append(tokenBudgetManager.trimSection(request.weatherReport().context(), 5000))
                 .append('\n')
                 .append("Cover every requested location/date instead of merely promising to check it.\n");
-        if (!request.weatherReport().available() && request.sources() != null && !request.sources().isEmpty()) {
-            prompt.append("The direct weather service was unavailable; use relevant retrieved evidence as fallback and state the limitation.\n");
+        if (!request.weatherReport().available()) {
+            prompt.append("The direct weather service was unavailable. Do not infer current conditions or numeric forecasts from history or unrelated documents.\n");
+            if (!EvidenceSourcePolicy.weatherSources(request.sources()).isEmpty()) {
+                prompt.append("Weather-related web snippets are unverified reference material, not confirmed measurements.\n");
+            }
         }
         prompt.append('\n');
     }

@@ -30,7 +30,15 @@ public class KnowledgeController {
     @PostMapping("/documents")
     public ResponseEntity<?> ingest(@RequestBody KnowledgeDocumentRequest request) {
         try {
-            return ResponseEntity.ok(knowledgeService.ingest(request));
+            if (request != null && request.knowledgeBaseId() != null && !request.knowledgeBaseId().isBlank()
+                    && !KnowledgeService.DEFAULT_KNOWLEDGE_BASE_ID.toString().equals(request.knowledgeBaseId())) {
+                return ResponseEntity.badRequest().body(java.util.Map.of("error", "通用知识库接口只能写入默认知识库。"));
+            }
+            KnowledgeDocumentRequest scopedRequest = request == null ? null : new KnowledgeDocumentRequest(
+                    KnowledgeService.DEFAULT_KNOWLEDGE_BASE_ID.toString(),
+                    request.title(), request.sourceUri(), request.content(), request.metadata()
+            );
+            return ResponseEntity.ok(knowledgeService.ingest(scopedRequest));
         } catch (IllegalArgumentException | IllegalStateException ex) {
             return ResponseEntity.badRequest().body(java.util.Map.of("error", ex.getMessage()));
         }
@@ -38,18 +46,18 @@ public class KnowledgeController {
 
     @GetMapping("/documents")
     public List<KnowledgeDocumentResponse> listDocuments() {
-        return knowledgeService.listDocuments();
+        return knowledgeService.listDocuments(KnowledgeService.DEFAULT_KNOWLEDGE_BASE_ID);
     }
 
     @GetMapping("/documents/{documentId}")
     public ResponseEntity<KnowledgeDocumentDetail> getDocument(@PathVariable UUID documentId) {
-        return knowledgeService.getDocument(documentId)
+        return knowledgeService.getDocument(documentId, KnowledgeService.DEFAULT_KNOWLEDGE_BASE_ID)
                 .map(ResponseEntity::ok)
                 .orElseGet(() -> ResponseEntity.notFound().build());
     }
 
     @GetMapping("/search")
     public List<KnowledgeHit> search(@RequestParam("q") String query) {
-        return knowledgeService.search(query);
+        return knowledgeService.search(query, KnowledgeService.DEFAULT_KNOWLEDGE_BASE_ID);
     }
 }

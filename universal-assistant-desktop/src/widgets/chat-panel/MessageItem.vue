@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { Bot, Edit3, Search } from '@lucide/vue'
+import { Edit3, Search } from '@lucide/vue'
+import assistantPortrait from '../../assets/assistant-human-portrait.webp'
 import MessageRenderer from '../../components/MessageRenderer.vue'
 import { modelLabel, phaseLabel, type UiMessage } from '../../features/chat/model/chatTypes'
 
@@ -19,7 +20,7 @@ defineEmits<{
 <template>
   <article class="message-row" :class="[message.role, { editing }]">
     <span v-if="message.role === 'assistant'" class="message-avatar" aria-hidden="true">
-      <Bot :size="15" />
+      <img :src="assistantPortrait" alt="" />
     </span>
     <div class="message-stack">
       <div class="message">
@@ -118,10 +119,11 @@ defineEmits<{
 
 <style scoped>
 .message-row {
-  --message-column-width: min(86%, 860px);
   display: flex;
   align-items: flex-end;
-  gap: 8px;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
 }
 
 .message-row.user {
@@ -129,28 +131,36 @@ defineEmits<{
 }
 
 .message-row.assistant {
-  --message-column-width: min(calc(86% - 36px), 824px);
   justify-content: flex-start;
 }
 
 .message-avatar {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  width: 28px;
-  height: 28px;
-  border-radius: 10px;
-  color: #ffffff;
-  background: #14b8a6;
-  box-shadow: 0 8px 16px rgba(20, 184, 166, 0.22);
+  width: 32px;
+  height: 32px;
+  overflow: hidden;
+  border: 1px solid var(--ua-border);
+  border-radius: 6px;
+  background: var(--ua-companion-soft);
+  box-shadow: none;
+}
+
+.message-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center 38%;
 }
 
 .message-stack {
   display: grid;
   gap: 6px;
-  width: var(--message-column-width);
-  max-width: var(--message-column-width);
+  min-width: 0;
+  max-width: min(91%, 760px);
 }
 
 .message-row.user .message-stack {
@@ -164,10 +174,11 @@ defineEmits<{
 .message {
   width: fit-content;
   max-width: 100%;
-  padding: 11px 13px;
-  border: 1px solid rgba(103, 119, 150, 0.14);
-  border-radius: 18px;
-  box-shadow: 0 10px 26px rgba(30, 41, 59, 0.06);
+  min-width: 0;
+  padding: 13px 16px;
+  border: 1px solid var(--ua-border);
+  border-radius: 7px;
+  box-shadow: none;
   user-select: text;
 }
 
@@ -180,25 +191,51 @@ defineEmits<{
 }
 
 .message .cancelled-fallback {
-  color: #526075;
+  color: var(--ua-muted);
 }
 
 .message-row.user .message {
-  color: #ffffff;
-  border-color: #2563eb;
-  background: #2563eb;
-  border-bottom-right-radius: 6px;
+  color: var(--ua-ink);
+  border-color: var(--ua-user-border);
+  background: var(--ua-user-bubble);
+  border-radius: 7px 7px 2px 7px;
 }
 
 .message-row.user.editing .message {
-  outline: 3px solid rgba(37, 99, 235, 0.16);
-  box-shadow: 0 12px 30px rgba(37, 99, 235, 0.14);
+  outline: 3px solid rgba(206, 100, 131, 0.18);
+  box-shadow: none;
 }
 
 .message-row.assistant .message {
-  width: 100%;
-  background: #ffffff;
-  border-bottom-left-radius: 6px;
+  position: relative;
+  background: var(--ua-panel);
+  border-radius: 2px 7px 7px 7px;
+}
+
+.message-row.assistant .message::before {
+  content: '';
+  position: absolute;
+  top: 12px;
+  bottom: 12px;
+  left: -1px;
+  width: 2px;
+  border-radius: 0 3px 3px 0;
+  background: var(--ua-companion);
+}
+
+.message-row.user .message {
+  position: relative;
+}
+
+.message-row.user .message::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 16px;
+  width: 5px;
+  height: 3px;
+  border-radius: 0 0 3px 3px;
+  background: var(--ua-companion);
 }
 
 .message-actions {
@@ -208,10 +245,10 @@ defineEmits<{
 }
 
 .message-actions .ghost-icon.small {
-  color: #5b6b86;
-  background: rgba(255, 255, 255, 0.92);
-  border-color: rgba(103, 119, 150, 0.18);
-  box-shadow: 0 8px 18px rgba(30, 41, 59, 0.08);
+  color: var(--ua-muted);
+  background: var(--ua-panel);
+  border-color: var(--ua-border);
+  box-shadow: none;
 }
 
 .ghost-icon,
@@ -222,10 +259,10 @@ defineEmits<{
   gap: 6px;
   height: 32px;
   padding: 0 10px;
-  border: 1px solid rgba(103, 119, 150, 0.18);
+  border: 1px solid var(--ua-border);
   border-radius: 10px;
-  color: #344057;
-  background: #ffffff;
+  color: var(--ua-ink-soft);
+  background: var(--ua-panel);
   cursor: pointer;
   font: inherit;
   font-size: 13px;
@@ -245,15 +282,15 @@ defineEmits<{
 .tool-button.compact {
   min-height: 28px;
   padding: 0 9px;
-  border-radius: 999px;
+  border-radius: 7px 7px 3px 7px;
   font-size: 12px;
 }
 
 .tool-button:hover:not(:disabled),
 .ghost-icon:hover:not(:disabled) {
-  border-color: rgba(37, 99, 235, 0.28);
-  background: #eff6ff;
-  color: #1d4ed8;
+  border-color: var(--ua-border-strong);
+  background: var(--ua-primary-soft);
+  color: var(--ua-primary-strong);
 }
 
 button:disabled {
@@ -266,7 +303,7 @@ button:disabled {
   align-items: center;
   gap: 9px;
   min-height: 24px;
-  color: #64748b;
+  color: var(--ua-muted);
 }
 
 .message-progress small {
@@ -278,10 +315,10 @@ button:disabled {
   gap: 6px;
   margin-top: 9px;
   padding: 10px;
-  border: 1px solid rgba(245, 158, 11, 0.24);
-  border-radius: 12px;
-  color: #5b3a07;
-  background: rgba(255, 251, 235, 0.9);
+  border: 1px solid var(--ua-sun);
+  border-radius: 8px;
+  color: var(--ua-ink);
+  background: var(--ua-sun-soft);
 }
 
 .tool-confirmation div {
@@ -295,12 +332,12 @@ button:disabled {
 }
 
 .tool-confirmation p {
-  color: #5b3a07;
+  color: var(--ua-ink);
   font-size: 12px;
 }
 
 .tool-confirmation small {
-  color: #8a6116;
+  color: var(--ua-ink-soft);
   font-size: 11px;
   word-break: break-word;
 }
@@ -317,15 +354,15 @@ button:disabled {
   align-items: center;
   min-height: 20px;
   padding: 0 7px;
-  border-radius: 999px;
-  color: #59657a;
-  background: #eef2f8;
+  border-radius: 4px;
+  color: var(--ua-muted);
+  background: var(--ua-bg-deep);
   font-size: 11px;
 }
 
 .message-row.user .message-meta small {
-  color: #eff6ff;
-  background: rgba(255, 255, 255, 0.18);
+  color: var(--ua-primary-strong);
+  background: var(--ua-hover);
 }
 
 .typing-dots {
@@ -338,7 +375,7 @@ button:disabled {
   width: 6px;
   height: 6px;
   border-radius: 999px;
-  background: #14b8a6;
+  background: var(--ua-companion);
   animation: typing-dot 900ms ease-in-out infinite;
 }
 

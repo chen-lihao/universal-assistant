@@ -1,13 +1,12 @@
 <script setup lang="ts">
 import { nextTick, onMounted, ref, watch } from 'vue'
-import { Check, ChevronDown, ChevronUp, Cpu, Edit3, Paperclip, Search, Send, Square } from '@lucide/vue'
+import { Check, Cpu, Edit3, Search, Send, Square } from '@lucide/vue'
 
 const props = defineProps<{
   draft: string
   realtimeSearch: boolean
   selectedModel: string
   isSending: boolean
-  showFilePanel: boolean
   isEditingDraft: boolean
   placeholder: string
   modelOptions: readonly {
@@ -20,7 +19,6 @@ const emit = defineEmits<{
   'update:draft': [value: string]
   'update:realtimeSearch': [value: boolean]
   'update:selectedModel': [value: string]
-  toggleFilePanel: []
   cancelEdit: []
   submit: []
   stop: []
@@ -86,79 +84,80 @@ defineExpose({
 
 <template>
   <footer class="composer">
-    <div class="composer-options">
-      <button class="tool-pill" type="button" :class="{ active: showFilePanel }" @click="$emit('toggleFilePanel')">
-        <Paperclip :size="15" />
-        文件
-        <ChevronUp v-if="!showFilePanel" :size="14" />
-        <ChevronDown v-else :size="14" />
-      </button>
-      <label class="model-picker">
-        <Cpu :size="14" />
-        <select :value="selectedModel" :disabled="isSending" aria-label="Model" @change="updateSelectedModel">
-          <option v-for="model in modelOptions" :key="model.value" :value="model.value">
-            {{ model.label }}
-          </option>
-        </select>
-      </label>
-      <label class="search-toggle" :class="{ active: realtimeSearch }">
-        <input :checked="realtimeSearch" type="checkbox" @change="updateRealtimeSearch" />
-        <Search :size="14" />
-        <span>实时检索</span>
-      </label>
-    </div>
-    <div v-if="isEditingDraft" class="composer-edit-banner">
-      <span>
-        <Edit3 :size="13" />
-        正在编辑上一条问题，重发后会覆盖其后续回答
-      </span>
-      <button class="tool-button compact" type="button" :disabled="isSending" @click="$emit('cancelEdit')">
-        取消编辑
-      </button>
-    </div>
-    <div class="input-bar">
-      <textarea
-        ref="draftTextareaRef"
-        :value="draft"
-        rows="1"
-        :placeholder="placeholder"
-        @input="updateDraft"
-        @keydown.enter.exact.prevent="$emit('submit')"
-      />
-      <button
-        class="send-button"
-        type="button"
-        :class="{ stop: isSending, editing: isEditingDraft }"
-        :disabled="!isSending && !draft.trim()"
-        :title="isSending ? '停止' : isEditingDraft ? '重新发送' : '发送'"
-        @click="isSending ? $emit('stop') : $emit('submit')"
-      >
-        <Square v-if="isSending" :size="16" />
-        <template v-else-if="isEditingDraft">
-          <Check :size="15" />
-          <span>重发</span>
-        </template>
-        <Send v-else :size="18" />
-      </button>
+    <div class="composer-inner">
+      <div class="composer-options">
+        <label class="model-picker">
+          <Cpu :size="14" />
+          <select :value="selectedModel" :disabled="isSending" aria-label="选择模型" @change="updateSelectedModel">
+            <option v-for="model in modelOptions" :key="model.value" :value="model.value">
+              {{ model.label }}
+            </option>
+          </select>
+        </label>
+        <label class="search-toggle" :class="{ active: realtimeSearch }">
+          <input :checked="realtimeSearch" type="checkbox" @change="updateRealtimeSearch" />
+          <Search :size="14" />
+          <span>实时检索</span>
+        </label>
+      </div>
+      <div v-if="isEditingDraft" class="composer-edit-banner">
+        <span>
+          <Edit3 :size="13" />
+          正在编辑上一条问题，重发后会覆盖其后续回答
+        </span>
+        <button class="tool-button compact" type="button" :disabled="isSending" @click="$emit('cancelEdit')">
+          取消编辑
+        </button>
+      </div>
+      <div class="input-bar">
+        <textarea
+          ref="draftTextareaRef"
+          :value="draft"
+          rows="1"
+          :placeholder="placeholder"
+          @input="updateDraft"
+          @keydown.enter.exact.prevent="$emit('submit')"
+        />
+        <button
+          class="send-button"
+          type="button"
+          :class="{ stop: isSending, editing: isEditingDraft }"
+          :disabled="!isSending && !draft.trim()"
+          :title="isSending ? '停止' : isEditingDraft ? '重新发送' : '发送'"
+          @click="isSending ? $emit('stop') : $emit('submit')"
+        >
+          <Square v-if="isSending" :size="16" />
+          <template v-else-if="isEditingDraft">
+            <Check :size="15" />
+            <span>重发</span>
+          </template>
+          <Send v-else :size="18" />
+        </button>
+      </div>
     </div>
   </footer>
 </template>
 
 <style scoped>
 .composer {
+  position: relative;
+  padding: 10px clamp(12px, 3vw, 24px) 13px;
+  border-top: 1px solid var(--ua-border);
+  background: var(--ua-panel);
+}
+
+.composer-inner {
   display: grid;
-  gap: 8px;
-  padding: 12px 14px 14px;
-  border-top: 1px solid rgba(103, 119, 150, 0.16);
-  background: rgba(255, 255, 255, 0.94);
-  backdrop-filter: blur(16px);
+  gap: 9px;
+  width: min(100%, 820px);
+  margin-inline: auto;
 }
 
 .composer-options {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
 }
 
@@ -169,10 +168,10 @@ defineExpose({
   gap: 8px;
   min-width: 0;
   padding: 8px 10px;
-  border: 1px solid rgba(37, 99, 235, 0.18);
-  border-radius: 12px;
-  color: #1e40af;
-  background: rgba(239, 246, 255, 0.9);
+  border: 1px solid var(--ua-border);
+  border-radius: 6px;
+  color: var(--ua-primary-strong);
+  background: var(--ua-primary-soft);
   font-size: 12px;
 }
 
@@ -195,9 +194,9 @@ defineExpose({
   align-items: center;
   justify-content: center;
   gap: 6px;
-  border: 1px solid rgba(103, 119, 150, 0.18);
-  color: #344057;
-  background: #ffffff;
+  border: 1px solid var(--ua-border);
+  color: var(--ua-ink-soft);
+  background: var(--ua-panel);
   font: inherit;
 }
 
@@ -205,7 +204,7 @@ defineExpose({
 .tool-pill {
   height: 32px;
   padding: 0 10px;
-  border-radius: 10px;
+  border-radius: 6px;
   cursor: pointer;
   font-size: 13px;
 }
@@ -213,42 +212,42 @@ defineExpose({
 .tool-button.compact {
   min-height: 28px;
   padding: 0 9px;
-  border-radius: 999px;
+  border-radius: 7px 7px 3px 7px;
   font-size: 12px;
 }
 
 .tool-button:hover:not(:disabled),
 .tool-pill:hover:not(:disabled) {
-  border-color: rgba(37, 99, 235, 0.28);
-  background: #eff6ff;
-  color: #1d4ed8;
+  border-color: var(--ua-border-strong);
+  background: var(--ua-primary-soft);
+  color: var(--ua-primary-strong);
 }
 
 .tool-pill {
-  border-radius: 999px;
+  border-radius: 6px;
 }
 
 .tool-pill.active {
-  color: #1d4ed8;
-  border-color: rgba(37, 99, 235, 0.28);
-  background: #eff6ff;
+  color: var(--ua-primary-strong);
+  border-color: var(--ua-border-strong);
+  background: var(--ua-primary-soft);
 }
 
 .model-picker,
 .search-toggle {
-  height: 32px;
-  padding: 0 10px;
-  border-radius: 999px;
+  height: 30px;
+  padding: 0 9px;
+  border-radius: 6px;
   font-size: 12px;
 }
 
 .model-picker select {
-  width: 158px;
+  width: 140px;
   min-width: 0;
   height: 28px;
   padding: 0 2px;
   border: 0;
-  color: #344057;
+  color: var(--ua-ink-soft);
   background: transparent;
   font: inherit;
   outline: none;
@@ -266,29 +265,41 @@ defineExpose({
 }
 
 .search-toggle.active {
-  color: #0f766e;
-  border-color: rgba(20, 184, 166, 0.28);
-  background: rgba(20, 184, 166, 0.1);
+  color: var(--ua-primary-strong);
+  border-color: var(--ua-primary);
+  background: var(--ua-primary-soft);
 }
 
 .input-bar {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
+  gap: 6px;
   align-items: stretch;
+  padding: 5px;
+  border: 1px solid var(--ua-border-strong);
+  border-radius: 8px;
+  background: var(--ua-panel-soft);
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.input-bar:focus-within {
+  border-color: var(--ua-primary);
+  box-shadow: var(--ua-focus);
 }
 
 .input-bar textarea {
   min-width: 0;
-  min-height: 46px;
+  min-height: 40px;
   resize: none;
   max-height: 160px;
   overflow-y: hidden;
-  padding: 11px 12px;
-  border: 1px solid rgba(103, 119, 150, 0.18);
-  border-radius: 14px;
-  color: #172033;
-  background: #f8fafc;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 4px;
+  color: var(--ua-ink);
+  background: transparent;
   font: inherit;
   line-height: 1.45;
   user-select: text;
@@ -296,25 +307,29 @@ defineExpose({
 }
 
 .input-bar textarea:focus {
-  border-color: rgba(37, 99, 235, 0.52);
-  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+  box-shadow: none;
 }
 
 .send-button {
-  width: 42px;
-  min-width: 42px;
+  width: 40px;
+  min-width: 40px;
   height: auto;
   padding: 0;
   border: 0;
-  border-radius: 14px;
-  color: #ffffff;
-  background: #2563eb;
-  box-shadow: 0 12px 24px rgba(37, 99, 235, 0.24);
+  border-radius: 6px;
+  color: var(--ua-on-primary);
+  background: var(--ua-primary);
+  box-shadow: none;
+  transition:
+    background 160ms ease,
+    transform 160ms ease,
+    box-shadow 160ms ease;
   white-space: nowrap;
 }
 
 .send-button:hover:not(:disabled) {
-  background: #1d4ed8;
+  background: var(--ua-primary-strong);
+  transform: translateY(-1px);
 }
 
 .send-button.editing {
@@ -324,12 +339,12 @@ defineExpose({
 }
 
 .send-button.stop {
-  background: #ef4444;
-  box-shadow: 0 12px 24px rgba(239, 68, 68, 0.22);
+  background: var(--ua-danger);
+  box-shadow: none;
 }
 
 .send-button.stop:hover:not(:disabled) {
-  background: #dc2626;
+  background: #9d303d;
 }
 
 button {

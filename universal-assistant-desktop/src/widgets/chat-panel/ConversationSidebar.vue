@@ -48,10 +48,13 @@ function updateRenamingTitle(event: Event) {
 <template>
   <section class="conversation-panel">
     <div class="conversation-panel-header">
-      <strong>历史会话</strong>
+      <div>
+        <small>会话记录</small>
+        <strong>历史会话</strong>
+      </div>
       <button class="tool-button compact" type="button" :disabled="isSending" @click="$emit('startNew')">
         <Plus :size="14" />
-        临时新会话
+        新会话
       </button>
     </div>
     <div class="conversation-list">
@@ -127,11 +130,11 @@ function updateRenamingTitle(event: Event) {
 <style scoped>
 .conversation-panel {
   display: grid;
-  gap: 10px;
-  max-height: 210px;
-  padding: 12px 14px;
-  border-bottom: 1px solid rgba(103, 119, 150, 0.14);
-  background: rgba(248, 250, 252, 0.96);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 12px;
+  padding: 17px 12px;
+  border-right: 1px solid var(--ua-border);
+  background: var(--ua-panel-soft);
   overflow: hidden;
 }
 
@@ -143,8 +146,19 @@ function updateRenamingTitle(event: Event) {
 }
 
 .conversation-panel-header strong {
-  color: #172033;
+  color: var(--ua-ink);
   font-size: 13px;
+}
+
+.conversation-panel-header > div {
+  display: grid;
+  gap: 2px;
+}
+
+.conversation-panel-header > div small {
+  color: var(--ua-companion-strong);
+  font-size: 11px;
+  font-weight: 700;
 }
 
 .tool-button,
@@ -155,10 +169,10 @@ function updateRenamingTitle(event: Event) {
   gap: 6px;
   height: 32px;
   padding: 0 10px;
-  border: 1px solid rgba(103, 119, 150, 0.18);
-  border-radius: 10px;
-  color: #344057;
-  background: #ffffff;
+  border: 1px solid var(--ua-border);
+  border-radius: 6px;
+  color: var(--ua-ink-soft);
+  background: var(--ua-panel);
   cursor: pointer;
   font: inherit;
   font-size: 13px;
@@ -167,15 +181,15 @@ function updateRenamingTitle(event: Event) {
 .tool-button.compact {
   min-height: 28px;
   padding: 0 9px;
-  border-radius: 999px;
+  border-radius: 7px 7px 3px 7px;
   font-size: 12px;
 }
 
 .tool-button:hover:not(:disabled),
 .ghost-icon:hover:not(:disabled) {
-  border-color: rgba(37, 99, 235, 0.28);
-  background: #eff6ff;
-  color: #1d4ed8;
+  border-color: var(--ua-border-strong);
+  background: var(--ua-primary-soft);
+  color: var(--ua-primary-strong);
 }
 
 .ghost-icon {
@@ -190,14 +204,15 @@ function updateRenamingTitle(event: Event) {
 }
 
 .ghost-icon.danger:hover:not(:disabled) {
-  color: #b91c1c;
-  border-color: rgba(239, 68, 68, 0.28);
-  background: #fff1f2;
+  color: var(--ua-danger);
+  border-color: var(--ua-danger);
+  background: var(--ua-danger-soft);
 }
 
 .conversation-list {
   display: grid;
-  gap: 6px;
+  align-content: start;
+  gap: 3px;
   min-height: 0;
   overflow-y: auto;
 }
@@ -206,21 +221,19 @@ function updateRenamingTitle(event: Event) {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 10px;
+  gap: 4px;
   width: 100%;
   min-height: 38px;
-  padding: 5px 6px 5px 9px;
-  border: 1px solid rgba(103, 119, 150, 0.14);
-  border-radius: 10px;
-  color: #344057;
-  background: #ffffff;
+  padding: 7px 7px 7px 10px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--ua-ink-soft);
+  background: transparent;
 }
 
 .conversation-open {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 10px;
+  gap: 3px;
   min-width: 0;
   padding: 0;
   border: 0;
@@ -238,15 +251,15 @@ function updateRenamingTitle(event: Event) {
 }
 
 .conversation-open small {
-  color: #7a8598;
-  font-size: 11px;
+  color: var(--ua-muted);
+  font-size: 10px;
 }
 
 .conversation-item:hover,
 .conversation-item.active {
-  color: #1d4ed8;
-  background: #eff6ff;
-  border-color: rgba(37, 99, 235, 0.24);
+  color: var(--ua-primary-strong);
+  background: var(--ua-primary-soft);
+  border-color: var(--ua-border);
 }
 
 .conversation-item.renaming {
@@ -279,29 +292,29 @@ button:disabled {
   min-width: 0;
   height: 28px;
   padding: 0 8px;
-  border: 1px solid rgba(37, 99, 235, 0.34);
+  border: 1px solid var(--ua-border-strong);
   border-radius: 8px;
   outline: none;
-  color: #172033;
-  background: #ffffff;
+  color: var(--ua-ink);
+  background: var(--ua-panel);
   font: inherit;
   font-size: 13px;
 }
 
 .conversation-rename input:focus {
-  border-color: rgba(37, 99, 235, 0.58);
-  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+  border-color: var(--ua-primary);
+  box-shadow: var(--ua-focus);
 }
 
 .empty-conversation {
   margin: 6px 2px;
-  color: #7a8598;
+  color: var(--ua-muted);
   font-size: 12px;
 }
 
 .error-text {
   margin: 0;
-  color: #dc2626;
+  color: var(--ua-danger);
   font-size: 12px;
 }
 </style>
